@@ -22,8 +22,16 @@ const ABC_CFG = {
   MASTER_SHEET: "CRONOGRAMA_CODIGOS",
 
   // Respaldo/complemento en Drive (ABC2026.txt, JSON { "CODIGO": "A", ... }).
-  // Poner el ID del archivo evita buscar por nombre en todo el Drive (más rápido
-  // y sin riesgo de tomar una copia equivocada). Si queda vacío, se busca por nombre.
+  // DESACTIVADO por defecto: el catálogo sale de la hoja CRONOGRAMA_CODIGOS del
+  // archivo maestro, que es la fuente única. Tenerlo apagado ahorra una búsqueda
+  // en Drive por cada relectura y quita una dependencia.
+  //
+  // Ponerlo en true SÓLO si el TXT tiene clasificaciones reales que la hoja
+  // maestra no tenga (ej. códigos de HYCITE con su letra propia). Con él
+  // apagado, lo que no esté en el maestro se resuelve por ABC_POR_DEFECTO.
+  // Si se activa, conviene poner TXT_FALLBACK_ID: buscar por nombre recorre
+  // TODO el Drive de la cuenta que ejecuta y puede tomar una copia equivocada.
+  USAR_TXT_FALLBACK: false,
   TXT_FALLBACK_ID: "",
   TXT_FALLBACK_NAME: "ABC2026.txt",
 
@@ -374,12 +382,16 @@ function ejecutarPipeline_(opciones) {
   actualizarColumnasAC(planilla);
   verificarYActualizarColumnaB(planilla);  // última fecha/hora de REGISTRO en col B
   generarSecuenciaColumnaD(planilla);      // secuencia D en base a G
-  // ABC (columna F). Se relee el archivo maestro con el primer conteo, cuando lo
-  // pide el menú, y luego cada ABC_CFG.REFRESCO_MIN minutos mientras haya
-  // actividad. El resto de los conteos resuelven con el catálogo cacheado.
+  // ABC (columna F). El archivo maestro se relee cuando nunca se leyó (archivo
+  // recién creado: ultimaLectura = 0), cuando venció la ventana de refresco, o
+  // cuando lo pide el menú. El resto de los conteos resuelven con el catálogo
+  // cacheado.
+  // El primer conteo NO fuerza por sí solo: si ACTIVAR ARCHIVO acaba de leer el
+  // maestro, volver a leerlo sería repetir varios segundos de trabajo sobre la
+  // ruta crítica del operario, para obtener exactamente el mismo catálogo.
   const ultimaLectura = parseInt(prop.getProperty(kAbc), 10) || 0;
   const tocaRefrescar = (Date.now() - ultimaLectura) >= ABC_CFG.REFRESCO_MIN * 60000;
-  const forzarABC = res.primerConteo || !!opciones.forzarABC || tocaRefrescar;
+  const forzarABC = !!opciones.forzarABC || tocaRefrescar;
 
   const abc = consolidarDatos(planilla, forzarABC);
   res.abc = abc;
@@ -482,17 +494,21 @@ function verificarAccesos_() {
     r.maestroMsg = "SIN ACCESO al archivo maestro. Solicite permiso de Lector sobre el archivo con ID " + ABC_CFG.MASTER_ID;
   }
 
-  try {
-    let archivo = null;
-    if (ABC_CFG.TXT_FALLBACK_ID) archivo = DriveApp.getFileById(ABC_CFG.TXT_FALLBACK_ID);
-    else {
-      const it = DriveApp.getFilesByName(ABC_CFG.TXT_FALLBACK_NAME);
-      while (it.hasNext() && !archivo) { const f = it.next(); if (!f.isTrashed()) archivo = f; }
+  if (!ABC_CFG.USAR_TXT_FALLBACK) {
+    r.txtMsg = "Desactivado (el catálogo sale del archivo maestro)";
+  } else {
+    try {
+      let archivo = null;
+      if (ABC_CFG.TXT_FALLBACK_ID) archivo = DriveApp.getFileById(ABC_CFG.TXT_FALLBACK_ID);
+      else {
+        const it = DriveApp.getFilesByName(ABC_CFG.TXT_FALLBACK_NAME);
+        while (it.hasNext() && !archivo) { const f = it.next(); if (!f.isTrashed()) archivo = f; }
+      }
+      if (archivo) { r.txt = true; r.txtMsg = "OK · " + archivo.getName(); }
+      else r.txtMsg = "No se encontró " + ABC_CFG.TXT_FALLBACK_NAME + " en su Drive (respaldo opcional)";
+    } catch (e) {
+      r.txtMsg = "SIN ACCESO a " + ABC_CFG.TXT_FALLBACK_NAME + " (respaldo opcional)";
     }
-    if (archivo) { r.txt = true; r.txtMsg = "OK · " + archivo.getName(); }
-    else r.txtMsg = "No se encontró " + ABC_CFG.TXT_FALLBACK_NAME + " en su Drive (respaldo opcional)";
-  } catch (e) {
-    r.txtMsg = "SIN ACCESO a " + ABC_CFG.TXT_FALLBACK_NAME + " (respaldo opcional)";
   }
 
   r.ok = r.maestro || r.txt; // con una sola fuente el ABC ya funciona
@@ -514,7 +530,8 @@ function menuVerificarAccesos() {
             " usted no necesita acceso al maestro para operar)\n\n")
       : "⚠️ El archivo aún no está activado (⚙️ → ACTIVAR ARCHIVO).\n\n") +
     (a.maestro ? "✅" : "⛔") + " Archivo maestro (CRONOGRAMA_CODIGOS)\n     " + a.maestroMsg + "\n\n" +
-    (a.txt ? "✅" : "⚠️") + " Respaldo " + ABC_CFG.TXT_FALLBACK_NAME + "\n     " + a.txtMsg + "\n\n" +
+    (a.txt ? "✅" : (ABC_CFG.USAR_TXT_FALLBACK ? "⚠️" : "➖")) +
+      " Respaldo " + ABC_CFG.TXT_FALLBACK_NAME + "\n     " + a.txtMsg + "\n\n" +
     (a.ok ? "El ABC puede actualizarse con normalidad."
           : "⛔ El ABC NO se puede actualizar: pida acceso de LECTOR al archivo maestro y vuelva a probar.")
   );
@@ -1068,7 +1085,8 @@ function leerMapaDesdeHoja_(clientes) {
 // Se prefiere el ID configurado; la búsqueda por nombre recorre TODO el Drive y
 // puede tomar una copia vieja, así que queda sólo como último recurso.
 function leerMapaDesdeTxt_() {
-  const res = { global: null, filas: 0, duplicadosArchivo: 0, error: "" };
+  const res = { global: null, filas: 0, duplicadosArchivo: 0, error: "", deshabilitado: false };
+  if (!ABC_CFG.USAR_TXT_FALLBACK) { res.deshabilitado = true; return res; }
   try {
     let archivo = null;
     if (ABC_CFG.TXT_FALLBACK_ID) {
@@ -1467,7 +1485,8 @@ function diagnosticoABC() {
     "Entradas CLIENTE+CODIGO: " + (m.porCliente || 0),
     "Entradas por código suelto: " + (m.porCodigo || 0),
     "Filas leídas del maestro: " + (m.filasMaestro || 0),
-    "  · desde " + ABC_CFG.TXT_FALLBACK_NAME + ": " + (m.desdeTxt || 0),
+    "  · desde " + ABC_CFG.TXT_FALLBACK_NAME + ": " +
+      (ABC_CFG.USAR_TXT_FALLBACK ? (m.desdeTxt || 0) : "desactivado"),
     "Columnas detectadas en el maestro: cliente=" + (m.colCliente || "?") +
       ", código=" + (m.colCodigo || "?") + ", abc=" + (m.colAbc || "?"),
     "",

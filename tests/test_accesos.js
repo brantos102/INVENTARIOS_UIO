@@ -19,10 +19,11 @@ const conTxt = (hay) => {
     return { hasNext: () => q.length > 0, next: () => q.shift() }; };
 };
 
-// --- Cuenta con todo en orden ---
+// --- Cuenta con todo en orden (el respaldo TXT viene desactivado) ---
 conMaestro(['CRONOGRAMA_CODIGOS']); conTxt(true);
 let a = ctx.verificarAccesos_();
-eq([a.maestro, a.txt, a.ok], [true, true, true], 'cuenta con acceso completo');
+eq([a.maestro, a.txt, a.ok], [true, false, true], 'con el maestro alcanza para operar');
+eq(a.txtMsg.indexOf('Desactivado') >= 0, true, 'el respaldo se reporta como desactivado, no como problema');
 eq(a.usuario, 'ingresosuio1@itsanet.com', 'identifica la cuenta que ejecuta');
 eq(a.maestroMsg.indexOf('CONTEOS CICLICOS ITSANET') >= 0, true, 'nombra el archivo maestro');
 
@@ -33,10 +34,16 @@ eq([a.maestro, a.txt, a.ok], [false, false, false], 'sin ninguna fuente el ABC n
 eq(a.maestroMsg.indexOf('SIN ACCESO') >= 0, true, 'dice claramente que falta el acceso');
 eq(a.maestroMsg.indexOf(ctx.evaluar('ABC_CFG.MASTER_ID')) >= 0, true, 'incluye el ID a solicitar');
 
-// --- Sin maestro pero con el respaldo: el ABC sigue funcionando ---
+// --- Sin maestro y sin respaldo: el ABC no puede funcionar ---
 sinMaestro(); conTxt(true);
 a = ctx.verificarAccesos_();
-eq([a.maestro, a.ok], [false, true], 'con el respaldo TXT alcanza para operar');
+eq([a.maestro, a.ok], [false, false], 'con el respaldo apagado, el maestro es imprescindible');
+
+// --- Si se reactiva el respaldo, vuelve a contar como fuente válida ---
+ctx.evaluar('ABC_CFG.USAR_TXT_FALLBACK = true');
+a = ctx.verificarAccesos_();
+eq([a.maestro, a.txt, a.ok], [false, true, true], 'con el respaldo activado alcanza para operar');
+ctx.evaluar('ABC_CFG.USAR_TXT_FALLBACK = false');
 
 // --- El maestro se abre pero le cambiaron el nombre a la hoja ---
 conMaestro(['OTRA_HOJA']); conTxt(false);

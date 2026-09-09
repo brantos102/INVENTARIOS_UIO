@@ -63,7 +63,7 @@ const esFecha = v => Object.prototype.toString.call(v) === '[object Date]';
 eq(esFecha(m.planilla.getRange('A2').getValue()), true, 'columna A: fecha de inicio del primer conteo');
 eq(m.planilla.getRange('C2').getValue(), 'INV-01', 'columna C: ID del inventario');
 eq(m.planilla.getRange('D2').getValue(), 1, 'columna D: secuencia generada');
-eq(m.llamadas.indexOf('abc:true') >= 0, true, 'el ABC se relee del maestro al arrancar');
+eq(m.llamadas.filter(l => l.indexOf('abc:') === 0).length, 1, 'el ABC se recalcula al arrancar');
 eq(m.props[K('WMS_INVENTARIO_INICIADO')], 'true', 'queda marcado como iniciado');
 const fechaInicio = m.planilla.getRange('A2').getValue();
 
@@ -154,5 +154,19 @@ m.props[K('WMS_ACTUALIZACION_PENDIENTE')] = '1';  // otra corrida se quedó sin 
 m.llamadas.length = 0;
 eq(ctx.ejecutarPipeline_({ motivo: 'C3' }).ejecutado, true, 'con marca pendiente recalcula igual');
 eq(m.props[K('WMS_ACTUALIZACION_PENDIENTE')], undefined, 'y consume la marca');
+
+// --- El primer conteo no repite la lectura que acaba de hacer ACTIVAR ARCHIVO ---
+m = montar([fila({ codigo: 'A1' })], 1);
+ctx.ejecutarPipeline_({ forzar: true, forzarABC: true, motivo: 'ACTIVACION' }); // lee el maestro
+m.planilla.getRange(2, 22).setValue(4);   // primer conteo, minutos después
+m.llamadas.length = 0;
+r = ctx.ejecutarPipeline_({ motivo: 'PRIMER_CONTEO' });
+eq(r.primerConteo, true, 'sigue siendo el arranque del inventario');
+eq(m.llamadas.indexOf('abc:false') >= 0, true, 'pero no repite la lectura del maestro');
+
+// En un archivo recién creado, sin ninguna lectura previa, sí lee
+m = montar([fila({ codigo: 'A1', v: 1 })], 1);
+r = ctx.ejecutarPipeline_({ motivo: 'PRIMER_CONTEO' });
+eq(m.llamadas.indexOf('abc:true') >= 0, true, 'archivo nuevo: lee el maestro en el primer conteo');
 
 t.fin();

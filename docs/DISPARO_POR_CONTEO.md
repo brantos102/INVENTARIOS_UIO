@@ -156,8 +156,9 @@ preferible dejar la celda como está a escribir el ABC de otro cliente.
 
 ### Valor por defecto por cliente (HYCITE = C)
 
-HYCITE no está en la hoja maestra: sus códigos viven en `ABC2026.txt`. Para que
-ningún producto suyo quede sin clasificar, se agregó un valor por defecto:
+Los códigos de HYCITE no están en la hoja maestra. Con el respaldo `ABC2026.txt`
+desactivado (`ABC_CFG.USAR_TXT_FALLBACK = false`, que es como viene), para que
+ningún producto suyo quede sin clasificar se usa un valor por defecto:
 
 ```js
 ABC_POR_DEFECTO: {

@@ -72,4 +72,27 @@ maestra([
 r = ctx.leerMapaDesdeHoja_(['DEGSO']);
 eq(r.duplicados, 1, 'detecta el duplicado conflictivo del mismo cliente');
 
+// --- Respaldo ABC2026.txt: desactivado por defecto ---
+// El catálogo sale del archivo maestro; con el respaldo apagado no se toca Drive.
+let toqueDrive = false;
+ctx.DriveApp.getFilesByName = () => { toqueDrive = true; return { hasNext: () => false }; };
+ctx.DriveApp.getFileById = () => { toqueDrive = true; return null; };
+
+eq(ctx.evaluar('ABC_CFG.USAR_TXT_FALLBACK'), false, 'viene desactivado de fabrica');
+let txt = ctx.leerMapaDesdeTxt_();
+eq([txt.deshabilitado, txt.global], [true, null], 'no lee el respaldo');
+eq(toqueDrive, false, 'no hace ninguna busqueda en Drive');
+
+// Se puede reactivar con una sola constante
+ctx.evaluar('ABC_CFG.USAR_TXT_FALLBACK = true');
+ctx.leerMapaDesdeTxt_();
+eq(toqueDrive, true, 'activandolo vuelve a consultar Drive');
+ctx.evaluar('ABC_CFG.USAR_TXT_FALLBACK = false');
+
+// --- Con el respaldo apagado, el catálogo depende sólo del maestro ---
+maestra([['CLIENTE', 'CODIGO', 'ABC'], ['DEGSO', 'AB-1', 'A']]);
+const cat = ctx.construirCatalogoABC_(['DEGSO']);
+eq(cat.payload.meta.fuente, 'HOJA', 'la fuente es solo la hoja maestra');
+eq(cat.payload.global['AB-1'], 'A', 'y el catalogo se arma igual');
+
 t.fin();

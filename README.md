@@ -43,16 +43,19 @@ activación. Ver `docs/INTEGRACION_TERMINAL_WMS.md`.
 
 ## Actualización del ABC (columna F)
 
-El catálogo sale de `CRONOGRAMA_CODIGOS` (archivo *CONTEOS CICLICOS ITSANET*) y se
-resuelve por **CLIENTE + CÓDIGO**: el mismo código puede tener distinta
-clasificación según el cliente. Sólo se carga la porción del maestro
-correspondiente a los clientes presentes en la columna E de la planilla.
+El catálogo sale de `CRONOGRAMA_CODIGOS` (archivo *CONTEOS CICLICOS ITSANET*), que es
+la **fuente única**. Se resuelve por **CLIENTE + CÓDIGO**: el mismo código puede tener
+distinta clasificación según el cliente.
 
 Orden de resolución del catálogo:
 
 ```
-caché comprimida (30 min)  →  hoja maestra CRONOGRAMA_CODIGOS + ABC2026.txt  →  snapshot local
+caché comprimida  →  hoja maestra CRONOGRAMA_CODIGOS  →  snapshot local
 ```
+
+El respaldo `ABC2026.txt` viene **desactivado** (`ABC_CFG.USAR_TXT_FALLBACK`): con el
+maestro accesible no aporta nada y ahorra una búsqueda en Drive por cada relectura.
+Activarlo sólo si ese archivo tiene clasificaciones que el maestro no tenga.
 
 * Los conteos usan caché o snapshot: no abren el archivo maestro en cada captura.
 * El archivo maestro se relee con el **primer conteo** y luego cada
