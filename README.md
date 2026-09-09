@@ -46,8 +46,9 @@ caché comprimida (30 min)  →  hoja maestra CRONOGRAMA_CODIGOS + ABC2026.txt  
 ```
 
 * Los conteos usan caché o snapshot: no abren el archivo maestro en cada captura.
-* Releen las fuentes sólo el **primer conteo** del inventario, la rutina de fondo (cada
-  30 min) y los botones **Actualizar ABC** y **Forzar TODO**.
+* El archivo maestro se relee con el **primer conteo** y luego cada
+  `ABC_CFG.REFRESCO_MIN` minutos (por defecto 60) **mientras haya actividad**; los botones
+  **Actualizar ABC** y **Forzar TODO** lo releen siempre.
 * En la columna F sólo se escriben las celdas que realmente cambian.
 * Un código que no está en el catálogo **no borra** la clasificación previa: se reporta en
   **⚙️ Inventarios WMS → Diagnóstico ABC**.

@@ -30,7 +30,7 @@ const ABC_CFG = {
   // Caché: el catálogo se comprime (gzip+Base64) y se trocea porque CacheService
   // sólo admite 100 KB por clave. Sin esto, un catálogo mediano NO se cachea.
   CACHE_KEY: "WMS_ABC_MAP_V2",
-  CACHE_TTL: 1800,          // 30 min
+  CACHE_TTL: 3600,          // 1 h (máximo permitido por CacheService: 6 h)
   CACHE_CHUNK: 90000,       // caracteres por trozo (< 100 KB)
   CACHE_MAX_CHUNKS: 25,
 
@@ -71,6 +71,12 @@ const ABC_CFG = {
   // ceros a la izquierda significativos.
   USAR_INDICE_ALTERNO: true,
 
+  // Cada cuántos minutos se vuelve a leer el archivo maestro MIENTRAS HAY
+  // OPERARIOS TRABAJANDO. Entre relecturas el ABC se resuelve con el catálogo
+  // cacheado, así que los conteos no pagan el costo de abrir el maestro.
+  // Subir a 120 para refrescar cada 2 horas.
+  REFRESCO_MIN: 60,
+
   // Si cambian más tramos que esto, sale más barato reescribir la columna completa.
   MAX_TRAMOS: 40,
 
@@ -102,6 +108,7 @@ const CONTEO_CFG = {
 
   PROP_FIRMA: "WMS_FIRMA_CONTEOS",     // último estado ya procesado
   PROP_INICIO: "WMS_INVENTARIO_INICIADO",
+  PROP_ABC_LEIDO: "WMS_ABC_ULTIMA_LECTURA", // última lectura real del maestro
 
   // Qué se escribe en la columna C al arrancar el inventario:
   // 'NOMBRE' = nombre del archivo (comportamiento actual, es lo que lee Power BI)
@@ -230,7 +237,7 @@ function marcarInicioInventario_(planilla, ss) {
 // Pipeline de actualización. NO toma el lock: lo hace quien lo llama.
 function ejecutarPipeline_(opciones) {
   opciones = opciones || {};
-  const res = { ejecutado: false, primerConteo: false, conteos: 0, motivo: opciones.motivo || "" };
+  const res = { ejecutado: false, primerConteo: false, conteos: 0, motivo: opciones.motivo || "", abc: null };
 
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const planilla = ss.getSheetByName(CONTEO_CFG.PLANILLA);
@@ -267,7 +274,18 @@ function ejecutarPipeline_(opciones) {
   actualizarColumnasAC(planilla);
   verificarYActualizarColumnaB(planilla);  // última fecha/hora de REGISTRO en col B
   generarSecuenciaColumnaD(planilla);      // secuencia D en base a G
-  consolidarDatos(planilla, res.primerConteo || !!opciones.forzarABC); // ABC en col F
+  // ABC (columna F). Se relee el archivo maestro con el primer conteo, cuando lo
+  // pide el menú, y luego cada ABC_CFG.REFRESCO_MIN minutos mientras haya
+  // actividad. El resto de los conteos resuelven con el catálogo cacheado.
+  const ultimaLectura = parseInt(prop.getProperty(CONTEO_CFG.PROP_ABC_LEIDO), 10) || 0;
+  const tocaRefrescar = (Date.now() - ultimaLectura) >= ABC_CFG.REFRESCO_MIN * 60000;
+  const forzarABC = res.primerConteo || !!opciones.forzarABC || tocaRefrescar;
+
+  const abc = consolidarDatos(planilla, forzarABC);
+  res.abc = abc;
+  // La marca se guarda sólo si de verdad se leyeron las fuentes: si el maestro
+  // estaba caído y se resolvió con el snapshot, se reintenta en la próxima vuelta.
+  if (abc && abc.origen === "FUENTES") prop.setProperty(CONTEO_CFG.PROP_ABC_LEIDO, String(Date.now()));
   actualizarAnalisis();
   respaldarProtegidas(planilla);           // copia de las columnas protegidas
 
@@ -1307,7 +1325,7 @@ function rutinaDeFondoMaestra() {
     // Se llama a ejecutarPipeline_ (sin lock propio) porque esta rutina YA tomó
     // el lock del script. Es el único punto periódico que relee el catálogo del
     // maestro: los conteos trabajan siempre desde caché/snapshot.
-    ejecutarPipeline_({ forzar: true, forzarABC: true, actividad: false, motivo: 'FONDO' });
+    ejecutarPipeline_({ forzar: true, actividad: false, motivo: 'FONDO' });
     actualizarRegistro();
   } catch (e) {
     console.error('rutinaDeFondoMaestra: ' + e);

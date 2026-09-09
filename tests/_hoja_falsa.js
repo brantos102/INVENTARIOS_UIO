@@ -59,6 +59,9 @@ function cargarScript() {
                 PropertiesService: {}, LockService: {}, Session: {}, ScriptApp: {} };
   vm.createContext(ctx);
   vm.runInContext(src, ctx);
+  // Las constantes declaradas con const no quedan como propiedades del global:
+  // para leerlas hay que evaluar dentro del contexto.
+  ctx.evaluar = expr => vm.runInContext(expr, ctx);
   return ctx;
 }
 

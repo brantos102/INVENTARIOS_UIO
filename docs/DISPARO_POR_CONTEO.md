@@ -187,17 +187,31 @@ de dos lecturas separadas de F y G.
 | Evento | ¿Recalcula? | ABC |
 |---|---|---|
 | Primer conteo en V/W/X | Sí, + sella A, C y D | Relee el maestro |
-| Conteo siguiente | Sí | Desde caché |
+| Conteo siguiente | Sí | Desde caché, o relee si pasó la ventana |
 | Escritura del propio script | **No** (firma igual) | — |
 | Formato, notas, otras hojas | **No** (firma igual) | — |
-| Rutina de fondo (30 min, activo) | Sí | Relee el maestro |
+| Rutina de fondo (30 min, activo) | Sí | Relee si pasó la ventana |
 | Sin conteos en 3 h | Pausa | — |
 | Menú "Forzar TODO" / "Actualizar ABC" | Sí, ignora la firma | Relee el maestro |
 | Edición manual de A2 o C2 | Replica la columna | — |
 
 ---
 
-## 5. Para que tome efecto
+## 5. Cada cuánto se relee el archivo maestro
+
+`ABC_CFG.REFRESCO_MIN` (por defecto **60 minutos**; poner `120` para dos horas).
+
+La ventana se cuenta desde la **última lectura real** del maestro, no desde la
+última corrida. Cualquier corrida del pipeline —un conteo o la rutina de fondo—
+relee el maestro si la ventana ya venció; si no, resuelve con el catálogo
+cacheado. Como el pipeline sólo corre cuando hay actividad, el refresco ocurre
+**mientras haya operarios trabajando** y se detiene solo cuando no los hay.
+
+Si el maestro no responde y el ABC se resolvió con el snapshot local, la marca de
+lectura **no** se actualiza: se reintenta en la vuelta siguiente en vez de
+esperar otra hora.
+
+## 6. Para que tome efecto
 
 El trigger instalable de `onEdit` **no existe en los archivos ya activados**. En
 cada archivo hijo hay que ejecutar una vez:

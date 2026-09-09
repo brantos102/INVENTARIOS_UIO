@@ -24,7 +24,7 @@ function montar(filas, filasRegistro) {
   ctx.verificarYActualizarColumnaB = () => llamadas.push('colB');
   ctx.actualizarAnalisis = () => llamadas.push('analisis');
   ctx.respaldarProtegidas = () => llamadas.push('respaldo');
-  ctx.consolidarDatos = (s, forzar) => { llamadas.push('abc:' + !!forzar); return { ok: true }; };
+  ctx.consolidarDatos = (s, forzar) => { llamadas.push('abc:' + !!forzar); return { ok: true, origen: 'FUENTES' }; };
   return { planilla, registro, props, llamadas };
 }
 
@@ -107,5 +107,28 @@ eq(m.props.WMS_LAST_INTERACTION, undefined, 'el fondo no renueva la marca de act
 ctx.ejecutarPipeline_({ forzar: true, motivo: 'CONTEO' });
 eq(typeof m.props.WMS_LAST_INTERACTION, 'string', 'un conteo real si marca actividad');
 eq(m.props.WMS_SYSTEM_SLEEPING, 'false', 'un conteo real despierta el sistema');
+
+// --- Refresco del ABC por tiempo: relee el maestro cada REFRESCO_MIN minutos ---
+m = montar([fila({ codigo: 'A1', v: 1 })], 1);
+ctx.ejecutarPipeline_({ motivo: 'C1' });                      // primer conteo: relee
+eq(typeof m.props.WMS_ABC_ULTIMA_LECTURA, 'string', 'anota la hora de la lectura del maestro');
+
+m.planilla.getRange(2, 23).setValue(2);                       // conteo siguiente
+m.llamadas.length = 0;
+ctx.ejecutarPipeline_({ motivo: 'C2' });
+eq(m.llamadas.indexOf('abc:false') >= 0, true, 'dentro de la ventana usa el catalogo cacheado');
+
+// Se envejece la marca más allá de la ventana configurada
+m.props.WMS_ABC_ULTIMA_LECTURA = String(Date.now() - (ctx.evaluar('ABC_CFG.REFRESCO_MIN') + 1) * 60000);
+m.planilla.getRange(3, 22).setValue(9);
+m.llamadas.length = 0;
+ctx.ejecutarPipeline_({ motivo: 'C3' });
+eq(m.llamadas.indexOf('abc:true') >= 0, true, 'pasada la ventana vuelve a leer el maestro');
+
+// Si el maestro está caído (se resolvió por snapshot) NO se anota la lectura
+m = montar([fila({ codigo: 'A1', v: 1 })], 1);
+ctx.consolidarDatos = () => ({ ok: true, origen: 'SNAPSHOT' });
+ctx.ejecutarPipeline_({ motivo: 'C1' });
+eq(m.props.WMS_ABC_ULTIMA_LECTURA, undefined, 'con el maestro caido se reintenta en la proxima vuelta');
 
 t.fin();
