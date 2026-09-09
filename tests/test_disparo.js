@@ -4,7 +4,11 @@ const { hojaFalsa, fila, cargarScript, comprobador } = require('./_hoja_falsa.js
 const ctx = cargarScript();
 const t = comprobador(), eq = t.eq;
 
-function montar(filas, filasRegistro) {
+// Las propiedades del script se guardan con el ID del archivo, para que un mismo
+// proyecto pueda atender varios inventarios sin pisarse.
+const K = (base, id) => base + ':' + (id || 'ID-ABC-123');
+
+function montar(filas, filasRegistro, id) {
   const planilla = hojaFalsa('PLANILLA DE CONTEO FISICO', filas);
   const registro = hojaFalsa('REGISTRO', Array.from({ length: filasRegistro || 0 }, () => ['x']));
   const props = {};
@@ -15,7 +19,7 @@ function montar(filas, filasRegistro) {
   });
   ctx.SpreadsheetApp.getActiveSpreadsheet = () => ({
     getName: () => 'INV-01',
-    getId: () => 'ID-ABC-123',
+    getId: () => id || 'ID-ABC-123',
     setSpreadsheetTimeZone: () => {},
     getSheetByName: n => (n === 'PLANILLA DE CONTEO FISICO' ? planilla : (n === 'REGISTRO' ? registro : null))
   });
@@ -41,7 +45,7 @@ let r = ctx.ejecutarPipeline_({ motivo: 'TEST' });
 eq(r.ejecutado, true, 'primera corrida sincroniza');
 eq(r.primerConteo, false, 'sin conteos no hay arranque de inventario');
 eq(m.planilla.getRange('A2').getValue(), '', 'la columna A sigue vacia sin conteos');
-eq(m.props.WMS_INVENTARIO_INICIADO, undefined, 'no marca el inventario como iniciado');
+eq(m.props[K('WMS_INVENTARIO_INICIADO')], undefined, 'no marca el inventario como iniciado');
 
 // --- Sin cambios: la firma corta el recálculo (y con ello el bucle de onChange) ---
 m.llamadas.length = 0;
@@ -59,7 +63,7 @@ eq(esFecha(m.planilla.getRange('A2').getValue()), true, 'columna A: fecha de ini
 eq(m.planilla.getRange('C2').getValue(), 'INV-01', 'columna C: ID del inventario');
 eq(m.planilla.getRange('D2').getValue(), 1, 'columna D: secuencia generada');
 eq(m.llamadas.indexOf('abc:true') >= 0, true, 'el ABC se relee del maestro al arrancar');
-eq(m.props.WMS_INVENTARIO_INICIADO, 'true', 'queda marcado como iniciado');
+eq(m.props[K('WMS_INVENTARIO_INICIADO')], 'true', 'queda marcado como iniciado');
 const fechaInicio = m.planilla.getRange('A2').getValue();
 
 // --- Conteos siguientes: no vuelven a sellar el arranque ni fuerzan el catálogo ---
@@ -103,15 +107,15 @@ eq(disparos.length, 0, 'otras hojas no disparan nada');
 // --- La rutina de fondo no se cuenta a sí misma como actividad del operario ---
 m = montar([fila({ codigo: 'A1', v: 3 })], 1);
 ctx.ejecutarPipeline_({ forzar: true, actividad: false, motivo: 'FONDO' });
-eq(m.props.WMS_LAST_INTERACTION, undefined, 'el fondo no renueva la marca de actividad');
+eq(m.props[K('WMS_LAST_INTERACTION')], undefined, 'el fondo no renueva la marca de actividad');
 ctx.ejecutarPipeline_({ forzar: true, motivo: 'CONTEO' });
-eq(typeof m.props.WMS_LAST_INTERACTION, 'string', 'un conteo real si marca actividad');
-eq(m.props.WMS_SYSTEM_SLEEPING, 'false', 'un conteo real despierta el sistema');
+eq(typeof m.props[K('WMS_LAST_INTERACTION')], 'string', 'un conteo real si marca actividad');
+eq(m.props[K('WMS_SYSTEM_SLEEPING')], 'false', 'un conteo real despierta el sistema');
 
 // --- Refresco del ABC por tiempo: relee el maestro cada REFRESCO_MIN minutos ---
 m = montar([fila({ codigo: 'A1', v: 1 })], 1);
 ctx.ejecutarPipeline_({ motivo: 'C1' });                      // primer conteo: relee
-eq(typeof m.props.WMS_ABC_ULTIMA_LECTURA, 'string', 'anota la hora de la lectura del maestro');
+eq(typeof m.props[K('WMS_ABC_ULTIMA_LECTURA')], 'string', 'anota la hora de la lectura del maestro');
 
 m.planilla.getRange(2, 23).setValue(2);                       // conteo siguiente
 m.llamadas.length = 0;
@@ -119,7 +123,7 @@ ctx.ejecutarPipeline_({ motivo: 'C2' });
 eq(m.llamadas.indexOf('abc:false') >= 0, true, 'dentro de la ventana usa el catalogo cacheado');
 
 // Se envejece la marca más allá de la ventana configurada
-m.props.WMS_ABC_ULTIMA_LECTURA = String(Date.now() - (ctx.evaluar('ABC_CFG.REFRESCO_MIN') + 1) * 60000);
+m.props[K('WMS_ABC_ULTIMA_LECTURA')] = String(Date.now() - (ctx.evaluar('ABC_CFG.REFRESCO_MIN') + 1) * 60000);
 m.planilla.getRange(3, 22).setValue(9);
 m.llamadas.length = 0;
 ctx.ejecutarPipeline_({ motivo: 'C3' });
@@ -129,6 +133,14 @@ eq(m.llamadas.indexOf('abc:true') >= 0, true, 'pasada la ventana vuelve a leer e
 m = montar([fila({ codigo: 'A1', v: 1 })], 1);
 ctx.consolidarDatos = () => ({ ok: true, origen: 'SNAPSHOT' });
 ctx.ejecutarPipeline_({ motivo: 'C1' });
-eq(m.props.WMS_ABC_ULTIMA_LECTURA, undefined, 'con el maestro caido se reintenta en la proxima vuelta');
+eq(m.props[K('WMS_ABC_ULTIMA_LECTURA')], undefined, 'con el maestro caido se reintenta en la proxima vuelta');
+
+// --- Un mismo proyecto atendiendo dos inventarios no mezcla su estado ---
+// (es el caso de la Terminal WMS llamando al motor para varios archivos)
+m = montar([fila({ codigo: 'A1', v: 1 })], 1, 'ARCHIVO-1');
+ctx.ejecutarPipeline_({ motivo: 'T1' });
+const propsCompartidas = m.props;
+eq(propsCompartidas[K('WMS_INVENTARIO_INICIADO', 'ARCHIVO-1')], 'true', 'marca el arranque del archivo 1');
+eq(propsCompartidas[K('WMS_INVENTARIO_INICIADO', 'ARCHIVO-2')], undefined, 'el archivo 2 no hereda el arranque del 1');
 
 t.fin();

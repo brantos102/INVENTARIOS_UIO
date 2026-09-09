@@ -9,6 +9,7 @@ Archivo base para generación de inventarios (Google Apps Script del archivo hij
 | `Codigo.gs` | Script completo del archivo hijo: menú, triggers, blindaje de columnas, catálogo ABC, análisis, registro y medición de tiempos. |
 | `docs/ANALISIS_ABC.md` | Análisis detallado del flujo de actualización ABC: fallas encontradas, causa y corrección aplicada. |
 | `docs/DISPARO_POR_CONTEO.md` | Disparo automático con el conteo en V/W/X: gatillos, firma de estado y arranque del inventario (A, C, D, F). |
+| `docs/INTEGRACION_TERMINAL_WMS.md` | Cómo llamar al motor desde la Terminal WMS para que el operario nunca abra el archivo real. |
 | `tests/` | Pruebas en Node del comportamiento puro del ABC (normalización, índice alterno, escritura diferencial). |
 
 ## Arranque del inventario
@@ -31,6 +32,10 @@ escrituras del propio script no vuelven a disparar recálculos.
 
 > Para que el trigger de conteo quede instalado hay que ejecutar una vez
 > **⚙️ Inventarios WMS → ACTIVAR ARCHIVO** en cada archivo hijo.
+
+Ese paso manual se elimina si la Terminal WMS llama al motor directamente después
+de escribir el conteo (`actualizarInventario(idArchivo)`): sin triggers y sin
+activación. Ver `docs/INTEGRACION_TERMINAL_WMS.md`.
 
 ## Actualización del ABC (columna F)
 
@@ -65,6 +70,7 @@ node tests/test_consolidar.js  # columna F: resolución por cliente y escritura 
 node tests/test_disparo.js     # firma de estado, arranque del inventario y gatillos
 node tests/test_catalogo.js    # lectura de CRONOGRAMA_CODIGOS y filtro por cliente
 node tests/test_columnas.js    # columnas A, C y D: replicación sin reescribir de más
+node tests/test_api.js         # actualizarInventario() y aislamiento entre inventarios
 ```
 
 Cargan `Codigo.gs` en un contexto aislado con los servicios de Google simulados, por lo que

@@ -117,6 +117,35 @@ const CONTEO_CFG = {
 };
 
 // ==========================================
+// CONTEXTO DE EJECUCIÓN
+// El motor puede correr de dos formas:
+//   · Dentro del archivo hijo (script contenedor) → usa la hoja activa.
+//   · Desde OTRO proyecto, como la Terminal WMS, apuntando a un archivo por ID.
+// Todo el motor pide la hoja con ssActual_() en vez de getActiveSpreadsheet(),
+// así el mismo código sirve para los dos casos sin duplicar nada.
+// ==========================================
+var SS_CTX_ = null;
+
+function ssActual_() {
+  return SS_CTX_ || SpreadsheetApp.getActiveSpreadsheet();
+}
+
+function fijarContexto_(ss) {
+  SS_CTX_ = ss || null;
+}
+
+// Las propiedades del script son POR PROYECTO. Si un mismo proyecto (el de la
+// Terminal) atiende muchos inventarios, el estado de uno pisaría al del otro:
+// por eso cada clave lleva el ID del archivo.
+function claveProp_(base, ss) {
+  try {
+    return base + ":" + (ss || ssActual_()).getId();
+  } catch (e) {
+    return base;
+  }
+}
+
+// ==========================================
 // 1. MENÚ PRINCIPAL DEL ARCHIVO HIJO
 // ==========================================
 function onOpen() {
@@ -162,8 +191,8 @@ function instalarTriggersEnCopia() {
     .create();
 
   // Despertar el sistema por primera vez
-  PropertiesService.getScriptProperties().setProperty('WMS_LAST_INTERACTION', Date.now().toString());
-  PropertiesService.getScriptProperties().setProperty('WMS_SYSTEM_SLEEPING', 'false');
+  PropertiesService.getScriptProperties().setProperty(claveProp_('WMS_LAST_INTERACTION'), Date.now().toString());
+  PropertiesService.getScriptProperties().setProperty(claveProp_('WMS_SYSTEM_SLEEPING'), 'false');
 
   SpreadsheetApp.getUi().alert(
     "✅ ¡ARCHIVO ACTIVADO CON ÉXITO!\n\n" +
@@ -239,33 +268,36 @@ function ejecutarPipeline_(opciones) {
   opciones = opciones || {};
   const res = { ejecutado: false, primerConteo: false, conteos: 0, motivo: opciones.motivo || "", abc: null };
 
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = ssActual_();
   const planilla = ss.getSheetByName(CONTEO_CFG.PLANILLA);
   if (!planilla) return res;
 
   const prop = PropertiesService.getScriptProperties();
+  const kFirma  = claveProp_(CONTEO_CFG.PROP_FIRMA, ss);
+  const kInicio = claveProp_(CONTEO_CFG.PROP_INICIO, ss);
+  const kAbc    = claveProp_(CONTEO_CFG.PROP_ABC_LEIDO, ss);
   const estado = firmaConteos_(planilla, ss.getSheetByName("REGISTRO"));
   res.conteos = estado.conteos;
 
   // Sin conteos nuevos (ni filas nuevas de REGISTRO) no se recalcula nada.
-  if (!opciones.forzar && prop.getProperty(CONTEO_CFG.PROP_FIRMA) === estado.firma) return res;
+  if (!opciones.forzar && prop.getProperty(kFirma) === estado.firma) return res;
 
   // Despertar el sistema y registrar la hora de la actividad. La rutina de fondo
   // pasa actividad:false — si se marcara a sí misma como actividad, el archivo
   // nunca cumpliría las 3 horas de inactividad y jamás entraría en pausa.
   if (opciones.actividad !== false) {
-    prop.setProperty('WMS_LAST_INTERACTION', Date.now().toString());
-    prop.setProperty('WMS_SYSTEM_SLEEPING', 'false');
+    prop.setProperty(claveProp_('WMS_LAST_INTERACTION', ss), Date.now().toString());
+    prop.setProperty(claveProp_('WMS_SYSTEM_SLEEPING', ss), 'false');
   }
 
   verificarConfiguracionInicial(planilla); // zona horaria Ecuador (+ C si falta)
 
   // ¿PRIMER conteo del inventario? Se sella el arranque y se relee el ABC del
   // maestro, para empezar con el catálogo del día.
-  const yaIniciado = prop.getProperty(CONTEO_CFG.PROP_INICIO) === 'true';
+  const yaIniciado = prop.getProperty(kInicio) === 'true';
   if (estado.conteos > 0 && !yaIniciado) {
     marcarInicioInventario_(planilla, ss);
-    prop.setProperty(CONTEO_CFG.PROP_INICIO, 'true');
+    prop.setProperty(kInicio, 'true');
     res.primerConteo = true;
   }
 
@@ -277,7 +309,7 @@ function ejecutarPipeline_(opciones) {
   // ABC (columna F). Se relee el archivo maestro con el primer conteo, cuando lo
   // pide el menú, y luego cada ABC_CFG.REFRESCO_MIN minutos mientras haya
   // actividad. El resto de los conteos resuelven con el catálogo cacheado.
-  const ultimaLectura = parseInt(prop.getProperty(CONTEO_CFG.PROP_ABC_LEIDO), 10) || 0;
+  const ultimaLectura = parseInt(prop.getProperty(kAbc), 10) || 0;
   const tocaRefrescar = (Date.now() - ultimaLectura) >= ABC_CFG.REFRESCO_MIN * 60000;
   const forzarABC = res.primerConteo || !!opciones.forzarABC || tocaRefrescar;
 
@@ -285,21 +317,27 @@ function ejecutarPipeline_(opciones) {
   res.abc = abc;
   // La marca se guarda sólo si de verdad se leyeron las fuentes: si el maestro
   // estaba caído y se resolvió con el snapshot, se reintenta en la próxima vuelta.
-  if (abc && abc.origen === "FUENTES") prop.setProperty(CONTEO_CFG.PROP_ABC_LEIDO, String(Date.now()));
+  if (abc && abc.origen === "FUENTES") prop.setProperty(kAbc, String(Date.now()));
   actualizarAnalisis();
   respaldarProtegidas(planilla);           // copia de las columnas protegidas
 
-  prop.setProperty(CONTEO_CFG.PROP_FIRMA, estado.firma);
+  prop.setProperty(kFirma, estado.firma);
   res.ejecutado = true;
   return res;
 }
 
 // Pipeline con lock. Es el punto de entrada de todos los gatillos.
 function procesarConteo_(opciones) {
+  opciones = opciones || {};
   const lock = LockService.getScriptLock();
   // Evita ejecuciones duplicadas/concurrentes: onChange y onEdit disparan a la vez
   // ante un mismo conteo. Sin esto, todo el recálculo corría dos veces.
-  if (!lock.tryLock(3000)) return { ejecutado: false, primerConteo: false, conteos: 0, motivo: 'LOCK' };
+  // El lock es POR PROYECTO: cuando la Terminal atiende varios inventarios a la
+  // vez conviene esperar más (opciones.esperaLock) en lugar de descartar la
+  // actualización de un archivo porque otro se estaba procesando.
+  if (!lock.tryLock(opciones.esperaLock || 3000)) {
+    return { ejecutado: false, primerConteo: false, conteos: 0, motivo: 'LOCK', abc: null };
+  }
   try {
     return ejecutarPipeline_(opciones);
   } catch (err) {
@@ -337,6 +375,84 @@ function alRegistrarConteo(e) {
   }
 }
 
+
+// ==========================================
+// 2.b API PARA LA TERMINAL WMS
+// La Terminal escribe el conteo y, en la misma llamada, pide la actualización.
+// Con esto el archivo hijo NO necesita triggers ni activación manual y el
+// operario nunca tiene que abrir la hoja real.
+//
+// Uso desde el proyecto de la Terminal (como biblioteca o copiando el motor):
+//
+//   const r = actualizarInventario(idArchivo);
+//   if (!r.exito) console.error(r.mensaje);
+//
+// Devuelve { exito, ejecutado, primerConteo, conteos, abc:{...}, ms, mensaje }.
+// Es idempotente: si no hay conteos nuevos no hace nada y responde en ~1 s.
+// ==========================================
+function actualizarInventario(idArchivo, opciones) {
+  opciones = opciones || {};
+  const t0 = Date.now();
+  const salida = { exito: false, idArchivo: idArchivo || "", ejecutado: false,
+                   primerConteo: false, conteos: 0, abc: null, ms: 0, mensaje: "" };
+  try {
+    if (!idArchivo) { salida.mensaje = "Falta el ID del archivo de inventario."; return salida; }
+
+    fijarContexto_(SpreadsheetApp.openById(idArchivo));
+    try {
+      const res = procesarConteo_({
+        motivo: opciones.motivo || 'TERMINAL',
+        forzar: !!opciones.forzar,
+        forzarABC: !!opciones.forzarABC,
+        // El lock es por proyecto: con varios inventarios simultáneos hay que
+        // esperar el turno, no descartar la actualización.
+        esperaLock: opciones.esperaLock || 30000
+      });
+
+      salida.ejecutado = res.ejecutado;
+      salida.primerConteo = res.primerConteo;
+      salida.conteos = res.conteos;
+      salida.exito = (res.motivo !== 'LOCK' && res.motivo !== 'ERROR');
+
+      if (res.abc) {
+        salida.abc = { origen: res.abc.origen, celdas: res.abc.celdas,
+                       sinAbc: res.abc.sinAbc, porDefecto: res.abc.porDefecto,
+                       clientes: res.abc.clientes };
+      }
+      if (res.motivo === 'LOCK') {
+        salida.mensaje = "El archivo estaba ocupado. El conteo ya quedó escrito y se procesará en la siguiente llamada.";
+      } else if (res.motivo === 'ERROR') {
+        salida.mensaje = "No se pudo completar la actualización. Revise los registros de ejecución.";
+      }
+    } finally {
+      fijarContexto_(null); // el contexto nunca queda colgado entre llamadas
+    }
+  } catch (e) {
+    console.error('actualizarInventario: ' + e);
+    salida.mensaje = String(e);
+  }
+  salida.ms = Date.now() - t0;
+  return salida;
+}
+
+// Estado del catálogo ABC de un inventario, sin interfaz gráfica (para mostrarlo
+// en la Terminal o para monitoreo).
+function diagnosticoInventario(idArchivo) {
+  try {
+    fijarContexto_(SpreadsheetApp.openById(idArchivo));
+    try {
+      const st = consolidarDatos(null, false);
+      return { exito: st.ok, origen: st.origen, filas: st.filas, celdas: st.celdas,
+               sinAbc: st.sinAbc, sinAbcEjemplos: st.sinAbcEjemplos, porDefecto: st.porDefecto,
+               clientes: st.clientes, mensaje: st.mensaje };
+    } finally {
+      fijarContexto_(null);
+    }
+  } catch (e) {
+    console.error('diagnosticoInventario: ' + e);
+    return { exito: false, mensaje: String(e) };
+  }
+}
 
 // ==========================================
 // 3. BLINDAJE Y PROTECCIÓN ESTRICTA (onEdit)
@@ -838,14 +954,27 @@ function trocear_(s, tam) {
   return out;
 }
 
+// La caché es POR PROYECTO. Si un mismo proyecto atiende varios inventarios, el
+// catálogo de uno no debe servirle a otro con distinto conjunto de clientes:
+// la clave se deriva de esos clientes, así los archivos del mismo cliente sí
+// comparten el catálogo y los demás no se pisan.
+function claveCacheABC_(clientes) {
+  const lista = (clientes || []).slice().sort().join(",");
+  if (!lista) return ABC_CFG.CACHE_KEY + ":TODOS";
+  let h = 5381;
+  for (let i = 0; i < lista.length; i++) h = ((h * 33) ^ lista.charCodeAt(i)) >>> 0;
+  return ABC_CFG.CACHE_KEY + ":" + h.toString(36);
+}
+
 function abcCacheGuardar_(payload) {
   try {
+    const base = claveCacheABC_(payload.clientes);
     const cache = CacheService.getScriptCache();
     const trozos = trocear_(comprimirB64_(JSON.stringify(payload)), ABC_CFG.CACHE_CHUNK);
     if (!trozos.length || trozos.length > ABC_CFG.CACHE_MAX_CHUNKS) return false;
     const obj = {};
-    trozos.forEach((t, i) => { obj[ABC_CFG.CACHE_KEY + ":" + i] = t; });
-    obj[ABC_CFG.CACHE_KEY + ":n"] = String(trozos.length);
+    trozos.forEach((t, i) => { obj[base + ":" + i] = t; });
+    obj[base + ":n"] = String(trozos.length);
     cache.putAll(obj, ABC_CFG.CACHE_TTL);
     return true;
   } catch (e) {
@@ -854,13 +983,14 @@ function abcCacheGuardar_(payload) {
   }
 }
 
-function abcCacheLeer_() {
+function abcCacheLeer_(clientes) {
   try {
+    const base = claveCacheABC_(clientes);
     const cache = CacheService.getScriptCache();
-    const n = parseInt(cache.get(ABC_CFG.CACHE_KEY + ":n"), 10);
+    const n = parseInt(cache.get(base + ":n"), 10);
     if (!n || n < 1) return null;
     const claves = [];
-    for (let i = 0; i < n; i++) claves.push(ABC_CFG.CACHE_KEY + ":" + i);
+    for (let i = 0; i < n; i++) claves.push(base + ":" + i);
     const partes = cache.getAll(claves);
     let b64 = "";
     for (let i = 0; i < n; i++) {
@@ -877,12 +1007,13 @@ function abcCacheLeer_() {
   }
 }
 
-function abcCacheBorrar_() {
+function abcCacheBorrar_(clientes) {
   try {
+    const base = claveCacheABC_(clientes);
     const cache = CacheService.getScriptCache();
-    const n = parseInt(cache.get(ABC_CFG.CACHE_KEY + ":n"), 10) || 0;
-    const claves = [ABC_CFG.CACHE_KEY + ":n", "WMS_ABC_MAP"]; // incluye la clave antigua
-    for (let i = 0; i < Math.max(n, ABC_CFG.CACHE_MAX_CHUNKS); i++) claves.push(ABC_CFG.CACHE_KEY + ":" + i);
+    const n = parseInt(cache.get(base + ":n"), 10) || 0;
+    const claves = [base + ":n", "WMS_ABC_MAP"]; // incluye la clave antigua
+    for (let i = 0; i < Math.max(n, ABC_CFG.CACHE_MAX_CHUNKS); i++) claves.push(base + ":" + i);
     cache.removeAll(claves);
   } catch (e) {
     console.error('abcCacheBorrar_: ' + e);
@@ -903,7 +1034,7 @@ function obtenerHojaSnapshot_(ss, crear) {
 
 function abcSnapshotGuardar_(payload) {
   try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const ss = ssActual_();
     if (!ss) return false;
     const h = obtenerHojaSnapshot_(ss, true);
     const trozos = trocear_(comprimirB64_(JSON.stringify(payload)), ABC_CFG.SNAP_CHUNK);
@@ -919,7 +1050,7 @@ function abcSnapshotGuardar_(payload) {
 
 function abcSnapshotLeer_() {
   try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const ss = ssActual_();
     if (!ss) return null;
     const h = obtenerHojaSnapshot_(ss, false);
     if (!h || h.getLastRow() < 2) return null;
@@ -1009,10 +1140,10 @@ function empaquetarCatalogo_(payload, origen, error) {
 function obtenerCatalogoABC_(forzar, clientes) {
   clientes = (clientes || []).filter(String);
 
-  if (forzar) abcCacheBorrar_();
+  if (forzar) abcCacheBorrar_(clientes);
 
   if (!forzar) {
-    const cacheado = abcCacheLeer_();
+    const cacheado = abcCacheLeer_(clientes);
     if (cacheado && cubreClientes_(cacheado.clientes, clientes)) {
       return empaquetarCatalogo_(cacheado, "CACHE");
     }
@@ -1050,7 +1181,7 @@ function consolidarDatos(sheet, forzar) {
   const stats = { ok: false, filas: 0, celdas: 0, sinAbc: 0, sinAbcEjemplos: [], porDefecto: 0,
                   origen: "", totalCodigos: 0, clientes: [], porCliente: 0, mensaje: "" };
   try {
-    if (!sheet) sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONTEO_CFG.PLANILLA);
+    if (!sheet) sheet = ssActual_().getSheetByName(CONTEO_CFG.PLANILLA);
     if (!sheet) { stats.mensaje = "No existe la hoja " + CONTEO_CFG.PLANILLA + "."; return stats; }
 
     const lr = sheet.getLastRow();
@@ -1303,12 +1434,14 @@ function rutinaDeFondoMaestra() {
   if (!lock.tryLock(2000)) return;
   try {
     const prop = PropertiesService.getScriptProperties();
-    const lastActivity = parseInt(prop.getProperty('WMS_LAST_INTERACTION')) || 0;
+    const kAct = claveProp_('WMS_LAST_INTERACTION');
+    const kSleep = claveProp_('WMS_SYSTEM_SLEEPING');
+    const lastActivity = parseInt(prop.getProperty(kAct)) || 0;
     const now = Date.now();
 
     // Calcular horas de inactividad
     const horasInactividad = (now - lastActivity) / (1000 * 60 * 60);
-    const estaDormido = prop.getProperty('WMS_SYSTEM_SLEEPING') === 'true';
+    const estaDormido = prop.getProperty(kSleep) === 'true';
 
     // 1. CONDICIÓN DE PAUSA: Si no ha habido conteos en más de 3 horas
     if (horasInactividad >= 3) {
@@ -1316,7 +1449,7 @@ function rutinaDeFondoMaestra() {
         // Hace una actualización final antes de dormirse para no consumir cuotas inútiles
         actualizarAnalisis();
         actualizarRegistro();
-        prop.setProperty('WMS_SYSTEM_SLEEPING', 'true');
+        prop.setProperty(kSleep, 'true');
       }
       return; // Pausado
     }
@@ -1379,7 +1512,7 @@ function registrarAuditoria(sheet, row, cantidad, colIndex, obs, userEmail) {
 // fecha real en la columna A, en zona horaria de Ecuador. Lee y escribe por lotes,
 // y solo reescribe si hay algo que corregir (evita gasto de cuota).
 function actualizarRegistro() {
-  const s = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("REGISTRO");
+  const s = ssActual_().getSheetByName("REGISTRO");
   if (!s || s.getLastRow() < 2) return;
 
   const tz = "America/Guayaquil";
@@ -1404,7 +1537,7 @@ function actualizarRegistro() {
 // 7. MOTOR DE ANÁLISIS
 // ==========================================
 function actualizarAnalisis() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = ssActual_();
   const planilla = ss.getSheetByName("PLANILLA DE CONTEO FISICO");
   const analisis = ss.getSheetByName("ANALISIS");
   if (!planilla || !analisis) return;
@@ -1505,7 +1638,11 @@ function marcarInicioConteo(codigo, posicion, cliente, userEmail) {
 
 // Se llama al ENVIAR/registrar el conteo. Calcula la duración desde el inicio
 // marcado y escribe una fila en la hoja TIEMPOS.
-function registrarFinConteo(codigo, posicion, cliente, unidades, userEmail, tipoConteo) {
+function registrarFinConteo(codigo, posicion, cliente, unidades, userEmail, tipoConteo, idArchivo) {
+  // idArchivo es opcional: lo usa la Terminal WMS al llamar desde otro proyecto.
+  // Desde el archivo hijo se omite y se trabaja sobre la hoja activa.
+  const ctxPropio = !!idArchivo;
+  if (ctxPropio) { try { fijarContexto_(SpreadsheetApp.openById(idArchivo)); } catch (e) { console.error('registrarFinConteo: ' + e); } }
   try {
     userEmail = userEmail || Session.getActiveUser().getEmail() || "SIN_USUARIO";
     const operario = USUARIOS_MAP[userEmail] || (String(userEmail).split('@')[0] || "Operador");
@@ -1530,7 +1667,7 @@ function registrarFinConteo(codigo, posicion, cliente, unidades, userEmail, tipo
     const uds = parseFloat(unidades) || 0;
     const undMin = (valido && durSeg > 0) ? Math.round((uds / (durSeg / 60)) * 100) / 100 : "";
 
-    const hoja = obtenerHojaTiempos(SpreadsheetApp.getActiveSpreadsheet());
+    const hoja = obtenerHojaTiempos(ssActual_());
     hoja.appendRow([
       inicio ? Utilities.formatDate(inicio, tz, "dd/MM/yy") : "",
       inicio ? Utilities.formatDate(inicio, tz, "HH:mm:ss") : "",
@@ -1545,6 +1682,8 @@ function registrarFinConteo(codigo, posicion, cliente, unidades, userEmail, tipo
   } catch (e) {
     console.error('registrarFinConteo: ' + e);
     return { exito: false, mensaje: String(e) };
+  } finally {
+    if (ctxPropio) fijarContexto_(null);
   }
 }
 
