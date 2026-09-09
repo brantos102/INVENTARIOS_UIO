@@ -97,4 +97,20 @@ ctx.consolidarDatos(h, false);
 eq(h.escrituras.length, 1, 'demasiados tramos -> escritura unica');
 eq(h.escrituras[0].n, 200, 'escribe la columna completa');
 
+// --- HYCITE sin clasificación en ningún catálogo -> "C" por defecto ---
+catalogo({}, { 'A1': 'A' });
+h = planilla([fila({ cliente: 'HYCITE', codigo: 'XQ-999' }),
+              fila({ cliente: 'HYCITE', codigo: 'A1' }),
+              fila({ cliente: 'DEGSO', codigo: 'XQ-999' })]);
+st = ctx.consolidarDatos(h, false);
+eq(h.datos[0][5], 'C', 'HYCITE sin catalogo recibe C por defecto');
+eq(h.datos[1][5], 'A', 'HYCITE con catalogo conserva su clasificacion real');
+eq(h.datos[2][5], '', 'el valor por defecto no se aplica a otros clientes');
+eq([st.porDefecto, st.sinAbc], [1, 1], 'cuenta por separado el defecto y el faltante');
+
+// --- El valor por defecto tampoco pisa lo que ya estaba bien clasificado ---
+h = planilla([fila({ cliente: 'HYCITE', codigo: 'A1', abc: 'A' })]);
+ctx.consolidarDatos(h, false);
+eq(h.datos[0][5], 'A', 'no degrada a C un codigo que si esta en el catalogo');
+
 t.fin();

@@ -46,6 +46,19 @@ Operario digitando en la hoja       ──► onEdit   ──┘        (lock)  
 * El `onEdit` simple conserva únicamente el blindaje de columnas y la auditoría,
   y llama al pipeline como red de seguridad por si el archivo aún no fue activado.
 
+### ¿Hay que modificar la Terminal WMS?
+
+**No. La Terminal WMS no se toca.** Sigue siendo la interfaz del operario y sigue
+escribiendo en la hoja exactamente igual que hoy.
+
+`onChange` es un disparador del **archivo de Google Sheets**, no de la Terminal:
+Google lo levanta solo cada vez que el contenido de la hoja cambia, sin importar
+quién lo cambió. Cuando la Terminal escribe un conteo, Google dispara el evento y
+el script reacciona. La Terminal no sabe —ni necesita saber— que el gatillo existe.
+
+Lo único que hace falta es que el archivo hijo tenga los triggers instalados
+(**⚙️ Inventarios WMS → ACTIVAR ARCHIVO**, una sola vez por archivo).
+
 ### La firma de estado
 
 ```js
@@ -80,7 +93,30 @@ Después se propagan A y C hacia abajo y queda marcado el arranque. En los
 conteos siguientes el catálogo sale de caché y no se vuelve a tocar A ni C.
 
 **Compatibilidad:** en los archivos que ya vienen trabajando, A2 y C2 nunca se
-pisan — si ya tienen valor, se respetan tal cual.
+pisan — si ya tienen valor, se respetan tal cual. El ABC, en cambio, **sí se
+actualiza siempre**: que A y C estén escritas no impide que la columna F se
+recalcule.
+
+### Columnas A y C: propagación y protección
+
+Escribir A2 o C2 arrastra el valor a toda la columna, y el `onEdit` bloquea la
+edición de esas columnas de la fila 3 hacia abajo. Eso se respetó tal cual, con
+tres precisiones:
+
+1. **Las protecciones no estorban al script.** `onEdit` sólo se dispara con
+   ediciones hechas por una persona en la interfaz; lo que escribe el script no
+   pasa por ahí. La propagación automática nunca choca con el bloqueo.
+2. **La propagación ahora es diferencial y sólo cubre filas con código.** Antes
+   `actualizarColumnasAC()` reescribía A3:A y C3:C completas de un golpe, cada
+   vez. Ahora se escriben únicamente las celdas que faltan —típicamente las filas
+   nuevas que va agregando la Terminal— y **nunca se borra** lo que ya está
+   escrito, ni siquiera en filas sin código.
+3. **Editar A2 o C2 a mano vuelve a propagar al instante.** Es la única edición
+   permitida en esas columnas, y antes no arrastraba nada hasta la siguiente
+   corrida completa.
+
+Las columnas B y D siguen la misma regla de siempre: sólo se llenan las filas que
+tienen código en la columna G.
 
 ---
 
@@ -111,6 +147,30 @@ búsqueda es:
 Un código ambiguo entre clientes se **excluye** del índice por código suelto: es
 preferible dejar la celda como está a escribir el ABC de otro cliente.
 
+> **El índice por código se arma con el maestro COMPLETO**, sin aplicar el filtro
+> por cliente. Es deliberado: si el CLIENTE de la columna E no coincide
+> exactamente con el del maestro, la búsqueda por cliente falla y el índice por
+> código es lo que mantiene el ABC funcionando. Filtrar ambos habría dejado el
+> catálogo vacío y la columna F sin actualizarse, en silencio. Los clientes de la
+> planilla que no aparecen en el maestro se listan en **Diagnóstico ABC**.
+
+### Valor por defecto por cliente (HYCITE = C)
+
+HYCITE no está en la hoja maestra: sus códigos viven en `ABC2026.txt`. Para que
+ningún producto suyo quede sin clasificar, se agregó un valor por defecto:
+
+```js
+ABC_POR_DEFECTO: {
+  "HYCITE": "C"
+}
+```
+
+Se aplica **sólo cuando el producto no aparece en ningún catálogo**. Un código de
+HYCITE que sí está clasificado conserva su letra real — el valor por defecto no
+degrada nada. Para sumar otro cliente basta agregar una línea (el nombre del
+cliente va en MAYÚSCULAS, como está en la columna E). El Diagnóstico ABC informa
+cuántas filas se resolvieron por esta vía.
+
 **b) Sólo hace falta la porción del maestro que este inventario usa.** El
 catálogo se filtra por los clientes presentes en la columna E de la planilla, así
 que lo que se comprime y se cachea son unos pocos miles de códigos en vez de todo
@@ -133,6 +193,7 @@ de dos lecturas separadas de F y G.
 | Rutina de fondo (30 min, activo) | Sí | Relee el maestro |
 | Sin conteos en 3 h | Pausa | — |
 | Menú "Forzar TODO" / "Actualizar ABC" | Sí, ignora la firma | Relee el maestro |
+| Edición manual de A2 o C2 | Replica la columna | — |
 
 ---
 

@@ -51,6 +51,8 @@ caché comprimida (30 min)  →  hoja maestra CRONOGRAMA_CODIGOS + ABC2026.txt  
 * En la columna F sólo se escriben las celdas que realmente cambian.
 * Un código que no está en el catálogo **no borra** la clasificación previa: se reporta en
   **⚙️ Inventarios WMS → Diagnóstico ABC**.
+* Los productos de **HYCITE** que no aparecen en ningún catálogo se clasifican como **C**
+  (`ABC_CFG.ABC_POR_DEFECTO`); los que sí están clasificados conservan su letra real.
 
 Todo lo ajustable está en la constante `ABC_CFG`, al inicio de `Codigo.gs`.
 
@@ -60,6 +62,8 @@ Todo lo ajustable está en la constante `ABC_CFG`, al inicio de `Codigo.gs`.
 node tests/test_abc.js         # normalización, índice alterno, cobertura por cliente
 node tests/test_consolidar.js  # columna F: resolución por cliente y escritura diferencial
 node tests/test_disparo.js     # firma de estado, arranque del inventario y gatillos
+node tests/test_catalogo.js    # lectura de CRONOGRAMA_CODIGOS y filtro por cliente
+node tests/test_columnas.js    # columnas A, C y D: replicación sin reescribir de más
 ```
 
 Cargan `Codigo.gs` en un contexto aislado con los servicios de Google simulados, por lo que

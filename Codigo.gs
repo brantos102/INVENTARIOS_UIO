@@ -52,8 +52,17 @@ const ABC_CFG = {
   // miles que este inventario realmente necesita.
   FILTRAR_POR_CLIENTE: true,
 
-  // Si un código NO está en el catálogo: true = conservar el ABC que ya tenía la
-  // celda (no destruye información); false = escribir ETIQUETA_SIN_ABC.
+  // Clasificación por defecto cuando el producto de un cliente NO aparece en
+  // ningún catálogo. HYCITE no está en la hoja maestra (sus códigos viven en
+  // ABC2026.txt), así que lo que no esté clasificado se toma como "C".
+  // Para agregar otro cliente: "CLIENTE": "LETRA" (el cliente va en MAYÚSCULAS).
+  ABC_POR_DEFECTO: {
+    "HYCITE": "C"
+  },
+
+  // Si un código NO está en el catálogo ni tiene valor por defecto: true =
+  // conservar el ABC que ya tenía la celda (no destruye información);
+  // false = escribir ETIQUETA_SIN_ABC.
   PRESERVAR_SIN_MATCH: true,
   ETIQUETA_SIN_ABC: "",
 
@@ -253,6 +262,9 @@ function ejecutarPipeline_(opciones) {
     res.primerConteo = true;
   }
 
+  // Completa A (fecha de inicio) y C (ID) en las filas que va agregando la
+  // Terminal. Es diferencial: si no falta ninguna, no escribe nada.
+  actualizarColumnasAC(planilla);
   verificarYActualizarColumnaB(planilla);  // última fecha/hora de REGISTRO en col B
   generarSecuenciaColumnaD(planilla);      // secuencia D en base a G
   consolidarDatos(planilla, res.primerConteo || !!opciones.forzarABC); // ABC en col F
@@ -375,6 +387,13 @@ function onEdit(e) {
         return;
       }
 
+      // Fila 2 de A o C: es la única edición permitida y arrastra el valor a
+      // toda la columna. Se replica al momento (sólo las celdas que cambian).
+      if ((col === 1 || col === 3) && row === 2 && numRows === 1 && numCols === 1) {
+        actualizarColumnasAC(sheet);
+        return;
+      }
+
       // Regla 4b: Columna D (secuencia automática) - Evaluación de una celda
       if (col === 4 && numRows === 1 && numCols === 1) {
         ui.alert("⛔ ACCIÓN DENEGADA\n\nLa Columna D (secuencia) es administrada automáticamente por el sistema.");
@@ -462,12 +481,66 @@ function verificarConfiguracionInicial(sheet) {
   }
 }
 
+// Comparación tolerante para decidir si una celda hay que reescribirla.
+function mismoValor_(a, b) {
+  const esFecha = v => Object.prototype.toString.call(v) === "[object Date]";
+  if (esFecha(a) && esFecha(b)) return a.getTime() === b.getTime();
+  return String(a === null || a === undefined ? "" : a) === String(b === null || b === undefined ? "" : b);
+}
+
+// ESCRITURA DIFERENCIAL de una columna: sólo se escriben los tramos contiguos
+// que cambian. Es lo que evita reescribir columnas enteras en cada conteo (con
+// el gasto de cuota y la cadena de eventos que eso provocaba).
+// Devuelve cuántas celdas se modificaron.
+function escribirColumnaDiferencial_(hoja, columna, filaInicio, nuevos, actuales) {
+  const tramos = [];
+  let celdas = 0;
+  for (let i = 0; i < nuevos.length; i++) {
+    if (!mismoValor_(nuevos[i], actuales[i])) {
+      celdas++;
+      const ult = tramos[tramos.length - 1];
+      if (ult && i === ult.fin + 1) ult.fin = i; else tramos.push({ ini: i, fin: i });
+    }
+  }
+  if (!tramos.length) return 0;
+
+  if (tramos.length > ABC_CFG.MAX_TRAMOS) {
+    hoja.getRange(filaInicio, columna, nuevos.length, 1).setValues(nuevos.map(v => [v]));
+  } else {
+    tramos.forEach(t => {
+      const bloque = nuevos.slice(t.ini, t.fin + 1).map(v => [v]);
+      hoja.getRange(filaInicio + t.ini, columna, bloque.length, 1).setValues(bloque);
+    });
+  }
+  return celdas;
+}
+
+// Replica A2 (fecha de inicio) y C2 (ID) hacia las filas de abajo.
+// Igual que las columnas B y D, sólo se rellenan las filas que TIENEN código en
+// la columna G, y nunca se borra lo que ya está escrito: las filas nuevas que
+// va agregando la Terminal quedan completas sin tocar el resto.
 function actualizarColumnasAC(sheet) {
   const lr = sheet.getLastRow();
-  if (lr < 3) return;
-  const vals = sheet.getRange("A2:C2").getValues()[0];
-  if (vals[0]) sheet.getRange(3, 1, lr - 2, 1).setValue(vals[0]);
-  if (vals[2]) sheet.getRange(3, 3, lr - 2, 1).setValue(vals[2]);
+  if (lr < 3) return 0;
+  const cab = sheet.getRange("A2:C2").getValues()[0];
+  const a2 = cab[0], c2 = cab[2];
+  if ((!a2 || String(a2).trim() === "") && (!c2 || String(c2).trim() === "")) return 0;
+
+  const n = lr - 2;
+  const codigos = sheet.getRange(3, 7, n, 1).getValues();
+  let celdas = 0;
+
+  if (a2 && String(a2).trim() !== "") {
+    const actual = sheet.getRange(3, 1, n, 1).getValues();
+    const nuevos = codigos.map((c, i) => (c[0] && String(c[0]).trim() !== "") ? a2 : actual[i][0]);
+    celdas += escribirColumnaDiferencial_(sheet, 1, 3, nuevos, actual.map(f => f[0]));
+  }
+  if (c2 && String(c2).trim() !== "") {
+    const actual = sheet.getRange(3, 3, n, 1).getValues();
+    const nuevos = codigos.map((c, i) => (c[0] && String(c[0]).trim() !== "") ? c2 : actual[i][0]);
+    celdas += escribirColumnaDiferencial_(sheet, 3, 3, nuevos, actual.map(f => f[0]));
+  }
+  return celdas;
 }
 
 // Macro (definido en appsscript.json): refresca fecha/hora (B) y datos base (A y C)
@@ -480,12 +553,14 @@ function actualizarColumnasBC() {
 
 function generarSecuenciaColumnaD(sheet) {
   const lr = sheet.getLastRow();
-  if (lr < 2) return;
+  if (lr < 2) return 0;
   // Genera secuencia numéricamente siempre y cuando haya código en G
   const codigos = sheet.getRange(2, 7, lr - 1, 1).getValues();
+  const actual = sheet.getRange(2, 4, lr - 1, 1).getValues();
   let x = 1;
-  const secuencia = codigos.map(r => (r[0] && String(r[0]).trim() !== "") ? [x++] : [""]);
-  sheet.getRange(2, 4, secuencia.length, 1).setValues(secuencia);
+  const secuencia = codigos.map(r => (r[0] && String(r[0]).trim() !== "") ? x++ : "");
+  // Diferencial: una vez generada, los conteos siguientes no reescriben la columna.
+  return escribirColumnaDiferencial_(sheet, 4, 2, secuencia, actual.map(f => f[0]));
 }
 
 function verificarYActualizarColumnaB(sheet) {
@@ -510,8 +585,11 @@ function verificarYActualizarColumnaB(sheet) {
   const rango = sheet.getRange(2, 2, colB.length, 1);
   rango.setValues(colB);
 
-  // Mostrar fecha Y hora en zona horaria de Ecuador (Quito, UTC-5)
-  if (ultimaFecha instanceof Date) {
+  // Mostrar fecha Y hora en zona horaria de Ecuador (Quito, UTC-5).
+  // Sólo se aplica si el formato todavía no está puesto: reponerlo en cada
+  // conteo era otra escritura de la columna completa.
+  if (Object.prototype.toString.call(ultimaFecha) === "[object Date]" &&
+      sheet.getRange(2, 2).getNumberFormat() !== "dd/MM/yy HH:mm:ss") {
     rango.setNumberFormat("dd/MM/yy HH:mm:ss");
   }
 }
@@ -587,7 +665,8 @@ function claveCatalogo_(cliente, codigo) {
 // La PROTECCIÓN de la hoja NO impide la lectura: basta acceso de Lector.
 function leerMapaDesdeHoja_(clientes) {
   const res = { mapa: null, global: null, filas: 0, leidas: 0, duplicados: 0, ejemplosDup: [],
-                ambiguos: 0, ejemplosAmb: [], colCliente: 0, colCodigo: 0, colAbc: 0, error: "" };
+                ambiguos: 0, ejemplosAmb: [], clientesVistos: {}, clientesSinDatos: [],
+                colCliente: 0, colCodigo: 0, colAbc: 0, error: "" };
   try {
     const master = SpreadsheetApp.openById(ABC_CFG.MASTER_ID);
     let hoja = master.getSheetByName(ABC_CFG.MASTER_SHEET);
@@ -635,7 +714,21 @@ function leerMapaDesdeHoja_(clientes) {
       res.leidas++;
 
       const cli = normalizarCliente_(datos[i][iCli]);
-      // Las filas sin cliente son genéricas y siempre se conservan.
+      if (cli) res.clientesVistos[cli] = true;
+
+      // Índice por código suelto: se arma SIEMPRE con el maestro completo, sin
+      // aplicar el filtro por cliente. Es la red de seguridad para cuando el
+      // CLIENTE de la planilla no coincide exactamente con el del maestro: sin
+      // esto el catálogo quedaría vacío y el ABC dejaría de actualizarse.
+      // Sólo vale si TODOS los clientes coinciden en la clasificación; si no,
+      // se descarta para no adivinar mal.
+      if (global[cod] === undefined) global[cod] = abc;
+      else if (global[cod] !== abc) {
+        ambiguo[cod] = true;
+        if (res.ejemplosAmb.length < 5) res.ejemplosAmb.push(cod);
+      }
+
+      // El mapa CLIENTE|CODIGO sí se puede acotar a los clientes de esta planilla.
       if (filtro && cli && !filtro[cli]) continue;
 
       if (cli) {
@@ -646,17 +739,16 @@ function leerMapaDesdeHoja_(clientes) {
         }
         mapa[clave] = abc;
       }
-
-      // Índice por código suelto: sólo sirve si TODOS los clientes coinciden en
-      // la clasificación; si no, se descarta para no adivinar mal.
-      if (global[cod] === undefined) global[cod] = abc;
-      else if (global[cod] !== abc) {
-        ambiguo[cod] = true;
-        if (res.ejemplosAmb.length < 5) res.ejemplosAmb.push(cod);
-      }
       res.filas++;
     }
     for (const cod in ambiguo) { delete global[cod]; res.ambiguos++; }
+
+    // Cliente de la planilla que no aparece en el maestro: se resolverá por el
+    // índice por código o por el valor por defecto. Queda registrado para el
+    // Diagnóstico ABC en vez de fallar en silencio.
+    if (clientes && clientes.length) {
+      clientes.forEach(c => { if (c && !res.clientesVistos[c]) res.clientesSinDatos.push(c); });
+    }
 
     res.mapa = Object.keys(mapa).length ? mapa : null;
     res.global = Object.keys(global).length ? global : null;
@@ -858,6 +950,7 @@ function construirCatalogoABC_(clientes) {
       ejemplosDup: hoja.ejemplosDup,
       ambiguos: hoja.ambiguos,
       ejemplosAmb: hoja.ejemplosAmb,
+      clientesSinDatos: hoja.clientesSinDatos || [],
       colCliente: hoja.colCliente,
       colCodigo: hoja.colCodigo,
       colAbc: hoja.colAbc,
@@ -936,7 +1029,7 @@ function obtenerMapaABC(forzar) {
 // La búsqueda es CLIENTE+CODIGO → CODIGO → código sin ceros a la izquierda.
 // ==========================================
 function consolidarDatos(sheet, forzar) {
-  const stats = { ok: false, filas: 0, celdas: 0, sinAbc: 0, sinAbcEjemplos: [],
+  const stats = { ok: false, filas: 0, celdas: 0, sinAbc: 0, sinAbcEjemplos: [], porDefecto: 0,
                   origen: "", totalCodigos: 0, clientes: [], porCliente: 0, mensaje: "" };
   try {
     if (!sheet) sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONTEO_CFG.PLANILLA);
@@ -988,6 +1081,13 @@ function consolidarDatos(sheet, forzar) {
       if (abc === undefined) abc = cat.global[cod];                 // 2) código (no ambiguo)
       if (abc === undefined) abc = cat.alt[claveAlterna_(cod)];     // 3) sin ceros a la izquierda
 
+      if (abc === undefined && cli && ABC_CFG.ABC_POR_DEFECTO[cli] !== undefined) {
+        // 4) Valor por defecto del cliente (HYCITE = C): el producto existe pero
+        // no está clasificado en ningún catálogo.
+        abc = ABC_CFG.ABC_POR_DEFECTO[cli];
+        stats.porDefecto++;
+      }
+
       if (abc === undefined) {
         stats.sinAbc++;
         if (stats.sinAbcEjemplos.length < 10) stats.sinAbcEjemplos.push((cli ? cli + "/" : "") + cod);
@@ -998,27 +1098,8 @@ function consolidarDatos(sheet, forzar) {
       nuevos[i] = abc;
     }
 
-    // Detectar tramos contiguos con cambios reales
-    const tramos = [];
-    for (let i = 0; i < n; i++) {
-      if (String(nuevos[i]) !== String(bloque[i][iAbc])) {
-        stats.celdas++;
-        const ult = tramos[tramos.length - 1];
-        if (ult && i === ult.fin + 1) ult.fin = i; else tramos.push({ ini: i, fin: i });
-      }
-    }
-
-    if (!tramos.length) { stats.ok = true; return stats; } // nada que escribir
-
-    if (tramos.length > ABC_CFG.MAX_TRAMOS) {
-      sheet.getRange(2, ABC_CFG.COL_ABC, n, 1).setValues(nuevos.map(v => [v]));
-    } else {
-      tramos.forEach(t => {
-        const bloqueF = nuevos.slice(t.ini, t.fin + 1).map(v => [v]);
-        sheet.getRange(2 + t.ini, ABC_CFG.COL_ABC, bloqueF.length, 1).setValues(bloqueF);
-      });
-    }
-
+    stats.celdas = escribirColumnaDiferencial_(sheet, ABC_CFG.COL_ABC, 2, nuevos,
+                                               bloque.slice(0, n).map(f => f[iAbc]));
     stats.ok = true;
     return stats;
   } catch (e) {
@@ -1045,6 +1126,7 @@ function actualizarABCManual() {
   const msg = "Fuente: " + st.origen +
               " · Catálogo: " + st.porCliente + " por cliente / " + st.totalCodigos + " por código" +
               " · Celdas actualizadas: " + st.celdas +
+              (st.porDefecto ? " · Por defecto: " + st.porDefecto : "") +
               (st.sinAbc ? " · Sin ABC: " + st.sinAbc : "");
   ss.toast(msg, "✅ ABC actualizado", 8);
 }
@@ -1074,6 +1156,9 @@ function diagnosticoABC() {
     "PLANILLA",
     "Filas evaluadas: " + st.filas,
     "Celdas actualizadas en esta corrida: " + st.celdas,
+    "Clasificados por valor por defecto: " + st.porDefecto +
+      (Object.keys(ABC_CFG.ABC_POR_DEFECTO).length
+        ? "  (" + Object.keys(ABC_CFG.ABC_POR_DEFECTO).map(c => c + "=" + ABC_CFG.ABC_POR_DEFECTO[c]).join(", ") + ")" : ""),
     "Códigos sin ABC: " + st.sinAbc,
     st.sinAbcEjemplos.length ? "  ej.: " + st.sinAbcEjemplos.join(", ") : "",
     "",
@@ -1081,6 +1166,9 @@ function diagnosticoABC() {
     (m.ejemplosDup && m.ejemplosDup.length) ? "  ej.: " + m.ejemplosDup.join(", ") : "",
     m.ambiguos ? "ℹ️ Códigos con ABC distinto entre clientes: " + m.ambiguos + " (se resuelven por cliente)" : "",
     (m.ejemplosAmb && m.ejemplosAmb.length) ? "  ej.: " + m.ejemplosAmb.join(", ") : "",
+    (m.clientesSinDatos && m.clientesSinDatos.length)
+      ? "⚠️ Clientes de la planilla que NO están en el maestro: " + m.clientesSinDatos.join(", ") +
+        "\n   (se resuelven por código o por valor por defecto)" : "",
     m.errorHoja ? "⚠️ Hoja maestra: " + m.errorHoja : "",
     m.errorTxt ? "⚠️ Respaldo TXT: " + m.errorTxt : ""
   ].filter(l => l !== "");
