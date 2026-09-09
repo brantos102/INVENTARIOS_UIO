@@ -36,6 +36,16 @@ eq(ctx.construirIndiceAlterno_({'00123':'A','000123':'A','0055':'B'}),
    {'123':'A','55':'B'}, 'alterno consistente se conserva');
 eq(ctx.construirIndiceAlterno_({'00123':'A','000123':'C'}), {}, 'colision descartada');
 
+// --- cliente y clave del catalogo ---
+eq(ctx.normalizarCliente_(' degso '), 'DEGSO', 'cliente normalizado');
+eq(ctx.claveCatalogo_('DEGSO','3M2091'), 'DEGSO|3M2091', 'clave cliente+codigo');
+
+// --- cubreClientes_: cuando el catalogo cacheado ya no sirve ---
+eq(ctx.cubreClientes_([], ['DEGSO']), true, 'catalogo completo sirve para cualquiera');
+eq(ctx.cubreClientes_(['DEGSO','HYCITE'], ['DEGSO']), true, 'subconjunto cubierto');
+eq(ctx.cubreClientes_(['DEGSO'], ['DEGSO','HYCITE']), false, 'cliente nuevo obliga a releer');
+eq(ctx.cubreClientes_(['DEGSO'], []), false, 'sin clientes conocidos se relee');
+
 // --- troceo / compresion base64 (sin gzip real) ---
 eq(ctx.trocear_('abcdefg', 3), ['abc','def','g'], 'troceo');
 eq(ctx.trocear_('', 3), [], 'troceo vacio');

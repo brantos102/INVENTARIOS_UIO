@@ -1,98 +1,100 @@
-const fs = require('fs'), vm = require('vm');
-const src = fs.readFileSync('' + __dirname + '/../Codigo.gs', 'utf8');
-const ctx = { console, Utilities:{}, SpreadsheetApp:{}, CacheService:{}, DriveApp:{},
-              PropertiesService:{}, LockService:{}, Session:{}, ScriptApp:{} };
-vm.createContext(ctx); vm.runInContext(src, ctx);
+// Escritura de la columna F: resolución por CLIENTE+CODIGO y escritura diferencial.
+const { hojaFalsa, fila, cargarScript, comprobador } = require('./_hoja_falsa.js');
+const ctx = cargarScript();
+const t = comprobador(), eq = t.eq;
 
-// Hoja falsa: matriz [F, G] por fila (fila 1 = encabezado, datos desde la 2)
-function hojaFalsa(filas) {
-  const escrituras = [];
-  const datos = filas.map(f => f.slice());   // [F, G]
-  return {
-    escrituras, datos,
-    getLastRow: () => datos.length + 1,
-    getRange(row, col, n) {
-      const off = row - 2;
-      return {
-        getValues: () => { const out=[]; for(let i=0;i<n;i++) out.push([datos[off+i] ? datos[off+i][col===6?0:1] : ""]); return out; },
-        setValues: (vals) => { escrituras.push({row, col, n: vals.length});
-          vals.forEach((v,i)=>{ if(!datos[off+i]) datos[off+i]=["",""]; datos[off+i][col===6?0:1]=v[0]; }); }
-      };
-    }
+let clientesPedidos = null;
+const catalogo = (mapa, global) => {
+  ctx.obtenerCatalogoABC_ = (forzar, clientes) => {
+    clientesPedidos = clientes;
+    return { mapa: mapa || {}, global: global || {}, alt: ctx.construirIndiceAlterno_(global || {}),
+             meta: {}, clientes: clientes || [], ts: Date.now(), origen: 'TEST' };
   };
-}
-const catalogo = (mapa) => { ctx.obtenerCatalogoABC_ = () => ({ mapa, alt: ctx.construirIndiceAlterno_(mapa), meta:{}, ts:Date.now(), origen:'TEST' }); };
-
-let fallos=0;
-const eq=(a,b,m)=>{const ok=JSON.stringify(a)===JSON.stringify(b);
-  if(!ok){fallos++;console.log('FALLO:',m,'→',JSON.stringify(a),'!=',JSON.stringify(b));}else console.log('ok  ',m);};
+};
+const planilla = (filas) => hojaFalsa('PLANILLA DE CONTEO FISICO', filas);
 
 // 1) Sin cambios -> NINGUNA escritura (antes reescribía toda la columna en cada evento)
-catalogo({'A1':'A','B2':'B'});
-let h = hojaFalsa([['A','A1'],['B','B2']]);
+catalogo({}, { 'A1': 'A', 'B2': 'B' });
+let h = planilla([fila({ codigo: 'A1', abc: 'A' }), fila({ codigo: 'B2', abc: 'B' })]);
 let st = ctx.consolidarDatos(h, false);
 eq(h.escrituras.length, 0, 'sin cambios no escribe nada');
 eq(st.celdas, 0, 'contador de celdas en 0');
 
 // 2) Una sola celda nueva -> una escritura de 1 celda
-h = hojaFalsa([['A','A1'],['','B2']]);
-st = ctx.consolidarDatos(h, false);
-eq(h.escrituras, [{row:3,col:6,n:1}], 'escribe solo la celda que cambio');
-eq(h.datos[1][0], 'B', 'valor correcto en F3');
+h = planilla([fila({ codigo: 'A1', abc: 'A' }), fila({ codigo: 'B2' })]);
+ctx.consolidarDatos(h, false);
+eq(h.escrituras, [{ row: 3, col: 6, n: 1, cols: 1 }], 'escribe solo la celda que cambio');
+eq(h.datos[1][5], 'B', 'valor correcto en F3');
 
-// 3) Tramos contiguos: filas 2-3 cambian, fila 5 cambia -> 2 escrituras
-catalogo({'A1':'A','B2':'B','C3':'C','D4':'D'});
-h = hojaFalsa([['','A1'],['','B2'],['C','C3'],['','D4']]);
+// 3) Tramos contiguos: filas 2-3 y fila 5 -> 2 escrituras
+catalogo({}, { 'A1': 'A', 'B2': 'B', 'C3': 'C', 'D4': 'D' });
+h = planilla([fila({ codigo: 'A1' }), fila({ codigo: 'B2' }), fila({ codigo: 'C3', abc: 'C' }), fila({ codigo: 'D4' })]);
 st = ctx.consolidarDatos(h, false);
-eq(h.escrituras, [{row:2,col:6,n:2},{row:5,col:6,n:1}], 'agrupa tramos contiguos');
+eq(h.escrituras.map(e => [e.row, e.n]), [[2, 2], [5, 1]], 'agrupa tramos contiguos');
 eq(st.celdas, 3, 'cuenta 3 celdas cambiadas');
 
-// 4) Código sin catálogo NO borra el ABC existente (PRESERVAR_SIN_MATCH)
-catalogo({'A1':'A'});
-h = hojaFalsa([['A','A1'],['B','ZZZ9']]);
+// 4) CLIENTE+CODIGO: el mismo código con ABC distinto según el cliente
+catalogo({ 'DEGSO|3M2091': 'A', 'HYCITE|3M2091': 'C' }, {});
+h = planilla([fila({ cliente: 'DEGSO', codigo: '3M2091' }), fila({ cliente: 'HYCITE', codigo: '3M2091' })]);
+ctx.consolidarDatos(h, false);
+eq([h.datos[0][5], h.datos[1][5]], ['A', 'C'], 'cada cliente recibe su propia clasificacion');
+
+// 5) El código ambiguo NO se resuelve por el índice suelto
+catalogo({ 'DEGSO|3M2091': 'A' }, {});  // 3M2091 quedó fuera del global por ambiguo
+h = planilla([fila({ cliente: 'OTRO', codigo: '3M2091', abc: '' })]);
+st = ctx.consolidarDatos(h, false);
+eq(h.datos[0][5], '', 'cliente desconocido no hereda un ABC ajeno');
+eq(st.sinAbcEjemplos, ['OTRO/3M2091'], 'el ejemplo identifica cliente y codigo');
+
+// 6) Código sin catálogo NO borra el ABC existente
+catalogo({}, { 'A1': 'A' });
+h = planilla([fila({ codigo: 'A1', abc: 'A' }), fila({ codigo: 'ZZZ9', abc: 'B' })]);
 st = ctx.consolidarDatos(h, false);
 eq(h.escrituras.length, 0, 'no borra el ABC de un codigo ausente del catalogo');
-eq(h.datos[1][0], 'B', 'conserva la clasificacion previa');
 eq(st.sinAbc, 1, 'lo reporta como sinAbc');
-eq(st.sinAbcEjemplos, ['ZZZ9'], 'guarda el ejemplo para diagnostico');
 
-// 5) Fila sin código -> F se limpia
-catalogo({'A1':'A'});
-h = hojaFalsa([['A','A1'],['B','']]);
-st = ctx.consolidarDatos(h, false);
-eq(h.datos[1][0], '', 'limpia F cuando no hay codigo en G');
-
-// 6) Ceros a la izquierda: catálogo con texto, planilla con número
-catalogo({'00123':'A'});
-h = hojaFalsa([['', 123]]);
-st = ctx.consolidarDatos(h, false);
-eq(h.datos[0][0], 'A', 'indice alterno resuelve ceros a la izquierda');
-
-// 7) Código numérico con .0 y minúsculas
-catalogo({'AB-100':'C'});
-h = hojaFalsa([['', ' ab-100 ']]);
+// 7) Fila sin código -> F se limpia
+h = planilla([fila({ codigo: 'A1', abc: 'A' }), fila({ abc: 'B' })]);
 ctx.consolidarDatos(h, false);
-eq(h.datos[0][0], 'C', 'normaliza espacios y mayusculas');
+eq(h.datos[1][5], '', 'limpia F cuando no hay codigo en G');
 
-// 8) Catálogo no disponible -> no toca nada y avisa
-ctx.obtenerCatalogoABC_ = () => ({ mapa:null, alt:{}, meta:{}, ts:0, origen:'NINGUNA', error:'maestro caido' });
-h = hojaFalsa([['A','A1'],['B','B2']]);
+// 8) Ceros a la izquierda: catálogo en texto, planilla en número
+catalogo({}, { '00123': 'A' });
+h = planilla([fila({ codigo: 123 })]);
+ctx.consolidarDatos(h, false);
+eq(h.datos[0][5], 'A', 'indice alterno resuelve ceros a la izquierda');
+
+// 9) Espacios y minúsculas
+catalogo({ 'DEGSO|AB-100': 'C' }, {});
+h = planilla([fila({ cliente: ' degso ', codigo: ' ab-100 ' })]);
+ctx.consolidarDatos(h, false);
+eq(h.datos[0][5], 'C', 'normaliza cliente y codigo');
+
+// 10) Los clientes de la planilla se le piden al catálogo (filtra el maestro)
+catalogo({}, { 'A1': 'A' });
+h = planilla([fila({ cliente: 'DEGSO', codigo: 'A1' }), fila({ cliente: 'HYCITE', codigo: 'A1' }), fila({ cliente: 'DEGSO', codigo: 'A1' })]);
+ctx.consolidarDatos(h, false);
+eq(clientesPedidos.sort(), ['DEGSO', 'HYCITE'], 'pide solo los clientes presentes, sin repetir');
+
+// 11) Catálogo no disponible -> no toca nada y avisa
+ctx.obtenerCatalogoABC_ = () => ({ mapa: {}, global: {}, alt: {}, meta: {}, clientes: [], ts: 0, origen: 'NINGUNA', error: 'maestro caido' });
+h = planilla([fila({ codigo: 'A1', abc: 'A' }), fila({ codigo: 'B2', abc: 'B' })]);
 st = ctx.consolidarDatos(h, false);
 eq(h.escrituras.length, 0, 'sin catalogo no escribe (no borra la columna F)');
 eq(st.ok, false, 'reporta fallo');
 
-// 9) Cola de filas vacías se recorta (no se escriben miles de celdas de relleno)
-catalogo({'A1':'A'});
-h = hojaFalsa([['','A1'],['',''],['',''],['','']]);
+// 12) Cola de filas vacías se recorta
+catalogo({}, { 'A1': 'A' });
+h = planilla([fila({ codigo: 'A1' }), fila({}), fila({}), fila({})]);
 st = ctx.consolidarDatos(h, false);
 eq(st.filas, 1, 'recorta la cola vacia de getLastRow()');
 
-// 10) Muchos tramos dispersos -> una sola escritura de toda la columna
-catalogo(Object.fromEntries(Array.from({length:200},(_,i)=>['K'+i, 'A'])));
-h = hojaFalsa(Array.from({length:200},(_,i)=> i%2 ? ['A','K'+i] : ['','K'+i]));
-st = ctx.consolidarDatos(h, false);
+// 13) Muchos tramos dispersos -> una sola escritura de toda la columna
+const muchos = {}; for (let i = 0; i < 200; i++) muchos['K' + i] = 'A';
+catalogo({}, muchos);
+h = planilla(Array.from({ length: 200 }, (_, i) => fila(i % 2 ? { codigo: 'K' + i, abc: 'A' } : { codigo: 'K' + i })));
+ctx.consolidarDatos(h, false);
 eq(h.escrituras.length, 1, 'demasiados tramos -> escritura unica');
 eq(h.escrituras[0].n, 200, 'escribe la columna completa');
 
-console.log(fallos ? '\n'+fallos+' FALLOS' : '\nTODAS LAS PRUEBAS OK');
-process.exit(fallos?1:0);
+t.fin();

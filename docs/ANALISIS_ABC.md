@@ -173,14 +173,18 @@ descarta.
 
 ---
 
-## 4. Pendiente de decisión (no aplicado)
+## 4. Resuelto después de este análisis
 
-1. **Reentrada de `onChange`.** La escritura diferencial corta el ciclo, pero cualquier
-   otra escritura del script (columnas B, D, análisis) sigue generando un evento extra.
-   Si se quiere eliminar del todo, hay que marcar en `ScriptProperties` una firma del
-   último estado escrito y descartar el evento que coincida.
-2. **`PRESERVAR_SIN_MATCH`.** Está en `true`. Si se prefiere que un código retirado del
+* **Reentrada de `onChange`** (punto 1 de los pendientes): resuelto con la firma de
+  estado en `ScriptProperties`. Ver `DISPARO_POR_CONTEO.md`.
+* **Colisión de códigos entre clientes**: el catálogo se indexa por `CLIENTE|CODIGO`.
+  El maestro `CRONOGRAMA_CODIGOS` tiene la columna CLIENTE y el mismo código puede
+  repetirse con otra clasificación; buscar sólo por código devolvía el ABC del último
+  cliente cargado. Ver `DISPARO_POR_CONTEO.md`, sección 3.
+
+## 5. Pendiente de decisión (no aplicado)
+1. **`PRESERVAR_SIN_MATCH`.** Está en `true`. Si se prefiere que un código retirado del
    catálogo quede en blanco o marcado (`"SIN ABC"`), se cambia la constante en
    `ABC_CFG` — está aislada a propósito.
-3. **Alcance del índice alterno** (ceros a la izquierda). Si los códigos del negocio
+2. **Alcance del índice alterno** (ceros a la izquierda). Si los códigos del negocio
    nunca llevan ceros a la izquierda, conviene desactivarlo (`USAR_INDICE_ALTERNO`).

@@ -40,8 +40,17 @@ const ABC_CFG = {
   SNAP_CHUNK: 45000,        // caracteres por celda (límite de Sheets: 50.000)
 
   // Columnas de la planilla de conteo
-  COL_CODIGO: 7,            // G
+  COL_CLIENTE: 5,           // E
   COL_ABC: 6,               // F
+  COL_CODIGO: 7,            // G
+
+  // El catálogo se resuelve primero por CLIENTE+CODIGO: en CRONOGRAMA_CODIGOS el
+  // mismo código puede existir para dos clientes con clasificación distinta, y
+  // buscar sólo por código devolvía el ABC del último cliente cargado.
+  // Además, al filtrar el maestro por los clientes presentes en esta planilla,
+  // el catálogo que se cachea baja de decenas de miles de códigos a los pocos
+  // miles que este inventario realmente necesita.
+  FILTRAR_POR_CLIENTE: true,
 
   // Si un código NO está en el catálogo: true = conservar el ABC que ya tenía la
   // celda (no destruye información); false = escribir ETIQUETA_SIN_ABC.
@@ -56,7 +65,7 @@ const ABC_CFG = {
   // Si cambian más tramos que esto, sale más barato reescribir la columna completa.
   MAX_TRAMOS: 40,
 
-  PAYLOAD_VERSION: 2
+  PAYLOAD_VERSION: 3
 };
 
 // Compatibilidad con el código anterior
@@ -70,6 +79,26 @@ const RESP_SHEET = "_RESP_WMS";
 // Medición de tiempos de conteo
 const TIEMPOS_SHEET = "TIEMPOS";
 const PAUSA_MAX_MIN = 10; // un hueco mayor a esto se considera pausa (no conteo real)
+
+// ==========================================
+// CONFIGURACIÓN DEL DISPARO POR CONTEO (columnas V, W, X)
+// El inventario "arranca" con el PRIMER conteo registrado, no al activar el
+// archivo: recién ahí se sellan la fecha de inicio (A), el ID (C), la
+// secuencia (D) y se refresca el ABC (F) contra el archivo maestro.
+// ==========================================
+const CONTEO_CFG = {
+  PLANILLA: "PLANILLA DE CONTEO FISICO",
+  COL_INI: 22,   // V — primer conteo
+  COL_FIN: 24,   // X — tercer conteo
+
+  PROP_FIRMA: "WMS_FIRMA_CONTEOS",     // último estado ya procesado
+  PROP_INICIO: "WMS_INVENTARIO_INICIADO",
+
+  // Qué se escribe en la columna C al arrancar el inventario:
+  // 'NOMBRE' = nombre del archivo (comportamiento actual, es lo que lee Power BI)
+  // 'ID'     = ID del archivo de Google Sheets
+  ID_MODO: "NOMBRE"
+};
 
 // ==========================================
 // 1. MENÚ PRINCIPAL DEL ARCHIVO HIJO
@@ -94,13 +123,23 @@ function instalarTriggersEnCopia() {
   // Limpiar para evitar duplicados
   triggers.forEach(t => ScriptApp.deleteTrigger(t));
 
-  // 1. Instalar el "Escuchador" para cuando la WebApp envíe datos
+  // 1. Instalar el "Escuchador" para cuando la WebApp envíe datos.
+  // onChange es el ÚNICO evento que dispara una escritura hecha por otro script
+  // (la Terminal WMS): onEdit sólo se dispara con ediciones hechas a mano.
   ScriptApp.newTrigger("manejadorCambiosExternos")
     .forSpreadsheet(sheet)
     .onChange()
     .create();
 
-  // 2. Instalar el temporizador de fondo (Revisa cada 30 min si debe trabajar o dormir)
+  // 2. Instalar el disparador de CONTEOS (columnas V, W, X) para las capturas
+  // digitadas directamente en la hoja. Es INSTALABLE a propósito: el onEdit
+  // simple corre sin autorización y no puede abrir el archivo maestro del ABC.
+  ScriptApp.newTrigger("alRegistrarConteo")
+    .forSpreadsheet(sheet)
+    .onEdit()
+    .create();
+
+  // 3. Instalar el temporizador de fondo (Revisa cada 30 min si debe trabajar o dormir)
   ScriptApp.newTrigger("rutinaDeFondoMaestra")
     .timeBased()
     .everyMinutes(30)
@@ -112,54 +151,159 @@ function instalarTriggersEnCopia() {
 
   SpreadsheetApp.getUi().alert(
     "✅ ¡ARCHIVO ACTIVADO CON ÉXITO!\n\n" +
-    "El sistema ahora está escuchando a la Terminal WMS externa. Actualizará las columnas y análisis automáticamente cuando lleguen los datos."
+    "El sistema está escuchando a la Terminal WMS y a las capturas hechas a mano.\n\n" +
+    "Con el PRIMER conteo registrado en las columnas V, W o X se sellan automáticamente:\n" +
+    "  • Columna A: fecha y hora de inicio del inventario\n" +
+    "  • Columna C: ID del inventario\n" +
+    "  • Columna D: secuencia\n" +
+    "  • Columna F: clasificación ABC (leída del archivo maestro)"
   );
 
   forzarInicializacionManual();
 }
 
 // ==========================================
-// 2. EL GATILLO ESCUCHADOR (Detecta inyecciones de la WebApp)
+// 2. DISPARADORES DE CONTEO
+// Los conteos llegan por dos caminos distintos y cada uno necesita su gatillo:
+//   · Terminal WMS (otro script escribe en la hoja) → sólo dispara onChange,
+//     que NO informa qué celda cambió.
+//   · Operario digitando en la hoja → dispara onEdit, que sí trae el rango.
+// Ambos caminos entran al mismo pipeline y se deduplican con una FIRMA del
+// estado de los conteos, así el trabajo se hace una sola vez.
 // ==========================================
-function manejadorCambiosExternos(e) {
+
+// Firma barata del estado: cuántos conteos hay en V:X, hasta qué fila y cuántas
+// filas tiene REGISTRO. Si no cambió, no hay nada nuevo que procesar (y de paso
+// se descartan los eventos que generan las propias escrituras del script, que
+// antes realimentaban el onChange).
+function firmaConteos_(planilla, registro) {
+  const out = { conteos: 0, ultimaFila: 0, filasRegistro: 0, firma: "0|0|0" };
+  const lr = planilla.getLastRow();
+  if (lr >= 2) {
+    const n = lr - 1;
+    const cols = CONTEO_CFG.COL_FIN - CONTEO_CFG.COL_INI + 1;
+    const datos = planilla.getRange(2, CONTEO_CFG.COL_INI, n, cols).getValues();
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < cols; j++) {
+        const v = datos[i][j];
+        if (v !== "" && v !== null && v !== undefined) { out.conteos++; out.ultimaFila = i + 2; }
+      }
+    }
+  }
+  out.filasRegistro = registro ? registro.getLastRow() : 0;
+  out.firma = out.conteos + "|" + out.ultimaFila + "|" + out.filasRegistro;
+  return out;
+}
+
+// ARRANQUE DEL INVENTARIO: se ejecuta una sola vez, con el primer conteo.
+// La fecha de la columna A pasa a ser la del PRIMER CONTEO REAL (antes era la
+// de la activación del archivo, que podía ser de días antes).
+// Nunca pisa un valor ya escrito: en archivos que ya vienen trabajando, A y C
+// se respetan tal como están.
+function marcarInicioInventario_(planilla, ss) {
+  ss = ss || planilla.getParent();
+  const a2 = planilla.getRange("A2").getValue();
+  const c2 = planilla.getRange("C2").getValue();
+
+  if (!a2 || String(a2).trim() === "") {
+    planilla.getRange("A2").setValue(new Date());
+    const lr = planilla.getLastRow();
+    if (lr >= 2) planilla.getRange(2, 1, lr - 1, 1).setNumberFormat("dd/MM/yy HH:mm:ss");
+  }
+  if (!c2 || String(c2).trim() === "") {
+    planilla.getRange("C2").setValue(CONTEO_CFG.ID_MODO === "ID" ? ss.getId() : ss.getName());
+  }
+
+  actualizarColumnasAC(planilla);    // replica A2 (fecha inicio) y C2 (ID) hacia abajo
+  generarSecuenciaColumnaD(planilla); // secuencia en D según los códigos de G
+}
+
+// Pipeline de actualización. NO toma el lock: lo hace quien lo llama.
+function ejecutarPipeline_(opciones) {
+  opciones = opciones || {};
+  const res = { ejecutado: false, primerConteo: false, conteos: 0, motivo: opciones.motivo || "" };
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const planilla = ss.getSheetByName(CONTEO_CFG.PLANILLA);
+  if (!planilla) return res;
+
+  const prop = PropertiesService.getScriptProperties();
+  const estado = firmaConteos_(planilla, ss.getSheetByName("REGISTRO"));
+  res.conteos = estado.conteos;
+
+  // Sin conteos nuevos (ni filas nuevas de REGISTRO) no se recalcula nada.
+  if (!opciones.forzar && prop.getProperty(CONTEO_CFG.PROP_FIRMA) === estado.firma) return res;
+
+  // Despertar el sistema y registrar la hora de la actividad. La rutina de fondo
+  // pasa actividad:false — si se marcara a sí misma como actividad, el archivo
+  // nunca cumpliría las 3 horas de inactividad y jamás entraría en pausa.
+  if (opciones.actividad !== false) {
+    prop.setProperty('WMS_LAST_INTERACTION', Date.now().toString());
+    prop.setProperty('WMS_SYSTEM_SLEEPING', 'false');
+  }
+
+  verificarConfiguracionInicial(planilla); // zona horaria Ecuador (+ C si falta)
+
+  // ¿PRIMER conteo del inventario? Se sella el arranque y se relee el ABC del
+  // maestro, para empezar con el catálogo del día.
+  const yaIniciado = prop.getProperty(CONTEO_CFG.PROP_INICIO) === 'true';
+  if (estado.conteos > 0 && !yaIniciado) {
+    marcarInicioInventario_(planilla, ss);
+    prop.setProperty(CONTEO_CFG.PROP_INICIO, 'true');
+    res.primerConteo = true;
+  }
+
+  verificarYActualizarColumnaB(planilla);  // última fecha/hora de REGISTRO en col B
+  generarSecuenciaColumnaD(planilla);      // secuencia D en base a G
+  consolidarDatos(planilla, res.primerConteo || !!opciones.forzarABC); // ABC en col F
+  actualizarAnalisis();
+  respaldarProtegidas(planilla);           // copia de las columnas protegidas
+
+  prop.setProperty(CONTEO_CFG.PROP_FIRMA, estado.firma);
+  res.ejecutado = true;
+  return res;
+}
+
+// Pipeline con lock. Es el punto de entrada de todos los gatillos.
+function procesarConteo_(opciones) {
   const lock = LockService.getScriptLock();
-  // Evita ejecuciones duplicadas/concurrentes: onEdit y onChange disparan a la vez
+  // Evita ejecuciones duplicadas/concurrentes: onChange y onEdit disparan a la vez
   // ante un mismo conteo. Sin esto, todo el recálculo corría dos veces.
-  if (!lock.tryLock(2000)) return;
+  if (!lock.tryLock(3000)) return { ejecutado: false, primerConteo: false, conteos: 0, motivo: 'LOCK' };
+  try {
+    return ejecutarPipeline_(opciones);
+  } catch (err) {
+    console.error('procesarConteo_: ' + err);
+    return { ejecutado: false, primerConteo: false, conteos: 0, motivo: 'ERROR' };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// GATILLO 1 — Terminal WMS: la inyección de datos hecha por otro script sólo
+// levanta onChange, que no dice qué cambió. La firma decide si hubo conteo nuevo.
+function manejadorCambiosExternos(e) {
   try {
     // Solo actuamos si el cambio es una edición (EDIT) o inyección de un script (OTHER)
     if (e && e.changeType !== 'EDIT' && e.changeType !== 'OTHER') return;
-
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const sheet = ss.getSheetByName("PLANILLA DE CONTEO FISICO");
-    if (!sheet) return;
-
-    // Despertar el sistema y registrar la hora de la actividad
-    const prop = PropertiesService.getScriptProperties();
-    prop.setProperty('WMS_LAST_INTERACTION', Date.now().toString());
-    prop.setProperty('WMS_SYSTEM_SLEEPING', 'false');
-
-    // Ejecutar las automatizaciones inmediatamente tras recibir el dato
-    verificarConfiguracionInicial(sheet); // Inicializa A y C + zona horaria Ecuador
-    verificarYActualizarColumnaB(sheet);  // Trae última fecha/hora de REGISTRO a Col B
-    generarSecuenciaColumnaD(sheet);      // Genera secuencia D en base a G
-
-    // El ABC (F) se recalcula en CADA cambio para que aparezca al momento.
-    // Es barato: el catálogo sale de caché/snapshot y sólo se escriben las celdas
-    // que realmente cambian (si no cambia nada, no se escribe y el ciclo de
-    // eventos que provocan las propias escrituras del script se corta solo).
-    consolidarDatos(sheet);
-
-    // Actualiza los cálculos y la hoja de Análisis
-    actualizarAnalisis();
-
-    // Guarda el estado bueno de las columnas protegidas (para poder restaurarlas)
-    respaldarProtegidas(sheet);
-
-  } catch(err) {
+    procesarConteo_({ motivo: 'CAMBIO_' + ((e && e.changeType) || 'DESCONOCIDO') });
+  } catch (err) {
     console.error('manejadorCambiosExternos: ' + err);
-  } finally {
-    lock.releaseLock();
+  }
+}
+
+// GATILLO 2 — conteo digitado en la hoja (trigger INSTALABLE onEdit).
+// Sólo reacciona a las columnas de conteo V, W y X: cualquier otra edición no
+// dispara recálculo alguno.
+function alRegistrarConteo(e) {
+  try {
+    if (!e || !e.range) return;
+    if (e.range.getSheet().getName() !== CONTEO_CFG.PLANILLA) return;
+    if (e.range.getRow() < 2) return;
+    if (e.range.getLastColumn() < CONTEO_CFG.COL_INI || e.range.getColumn() > CONTEO_CFG.COL_FIN) return;
+    procesarConteo_({ motivo: 'CONTEO_DIGITADO' });
+  } catch (err) {
+    console.error('alRegistrarConteo: ' + err);
   }
 }
 
@@ -258,7 +402,10 @@ function onEdit(e) {
         // Si ingresan un conteo por primera vez de forma manual
         if (e.value) {
           registrarAccionManual(e, sheet, row, col);
-          manejadorCambiosExternos({changeType: 'EDIT'});
+          // El pipeline también corre desde el trigger INSTALABLE alRegistrarConteo.
+          // Se deja aquí como red de seguridad por si el archivo aún no fue
+          // activado: la firma hace que sólo uno de los dos haga el trabajo.
+          procesarConteo_({ motivo: 'CONTEO_DIGITADO_SIMPLE' });
         }
       }
     }
@@ -295,28 +442,23 @@ function onEdit(e) {
 function verificarConfiguracionInicial(sheet) {
   const ss = sheet.getParent();
 
-  // 1. FORZAR LA ZONA HORARIA DEL ARCHIVO (Soluciona el desfase de +1 hora)
-  ss.setSpreadsheetTimeZone("America/Guayaquil");
+  // 1. FORZAR LA ZONA HORARIA DEL ARCHIVO (Soluciona el desfase de +1 hora).
+  // Sólo se escribe si hace falta: antes se reescribía en cada evento.
+  if (ss.getSpreadsheetTimeZone() !== "America/Guayaquil") {
+    ss.setSpreadsheetTimeZone("America/Guayaquil");
+  }
 
   const lr = sheet.getLastRow();
   if (lr < 2) return;
-  const a2 = sheet.getRange("A2").getValue();
+
+  // OJO: la FECHA DE INICIO (A2) ya NO se escribe aquí. Antes se sellaba al
+  // activar el archivo, así que el inventario "empezaba" el día de la
+  // activación aunque el primer conteo llegara días después. Ahora la escribe
+  // marcarInicioInventario_() con el primer conteo real en V, W o X.
   const c2 = sheet.getRange("C2").getValue();
-  let modificado = false;
-
-  // Llenar Fila 2 si está vacía
-  if (!a2 || a2.toString().trim() === "") {
-    sheet.getRange("A2").setValue(new Date());
-    modificado = true;
-  }
   if (!c2 || c2.toString().trim() === "") {
-    sheet.getRange("C2").setValue(ss.getName());
-    modificado = true;
-  }
-
-  // Propagar A2 y C2 hacia todas las filas de abajo
-  if (modificado) {
-    actualizarColumnasAC(sheet);
+    sheet.getRange("C2").setValue(CONTEO_CFG.ID_MODO === "ID" ? ss.getId() : ss.getName());
+    actualizarColumnasAC(sheet); // propaga A2 y C2 hacia las filas de abajo
   }
 }
 
@@ -425,12 +567,27 @@ function construirIndiceAlterno_(mapa) {
 // 4.c CATÁLOGO ABC — LECTURA DE FUENTES
 // ==========================================
 
-// Lee CODIGO -> ABC de la hoja maestra. Detecta las columnas por ENCABEZADO
-// (antes estaban fijas en B y C: si alguien insertaba una columna, el ABC se
-// llenaba con datos equivocados sin ningún error visible).
+// Cliente normalizado (columna A del maestro / columna E de la planilla).
+function normalizarCliente_(v) {
+  return normalizarABC_(v);
+}
+
+// Clave del catálogo: el mismo código puede repetirse entre clientes.
+function claveCatalogo_(cliente, codigo) {
+  return cliente + "|" + codigo;
+}
+
+// Lee CLIENTE + CODIGO -> ABC de la hoja maestra CRONOGRAMA_CODIGOS.
+// Detecta las columnas por ENCABEZADO (antes CODIGO y ABC estaban fijas en B y
+// C: si alguien insertaba una columna, el ABC se llenaba con datos equivocados
+// sin ningún error visible).
+// Si se reciben los clientes de la planilla, sólo se carga esa porción del
+// maestro: el catálogo cacheado baja de decenas de miles de códigos a los que
+// este inventario realmente usa.
 // La PROTECCIÓN de la hoja NO impide la lectura: basta acceso de Lector.
-function leerMapaDesdeHoja_() {
-  const res = { mapa: null, filas: 0, duplicados: 0, ejemplosDup: [], colCodigo: 0, colAbc: 0, error: "" };
+function leerMapaDesdeHoja_(clientes) {
+  const res = { mapa: null, global: null, filas: 0, leidas: 0, duplicados: 0, ejemplosDup: [],
+                ambiguos: 0, ejemplosAmb: [], colCliente: 0, colCodigo: 0, colAbc: 0, error: "" };
   try {
     const master = SpreadsheetApp.openById(ABC_CFG.MASTER_ID);
     let hoja = master.getSheetByName(ABC_CFG.MASTER_SHEET);
@@ -443,37 +600,67 @@ function leerMapaDesdeHoja_() {
     const lr = hoja.getLastRow(), lc = hoja.getLastColumn();
     if (lr < 2) { res.error = "La hoja maestra no tiene datos."; return res; }
 
-    // Ubicar columnas por encabezado; si no aparecen, se cae a B y C (legado).
+    // Ubicar columnas por encabezado; si no aparecen, se cae a A, B y C (legado).
     const enc = hoja.getRange(1, 1, 1, lc).getValues()[0].map(normalizarEncabezado_);
-    let cCod = 0, cAbc = 0;
+    let cCli = 0, cCod = 0, cAbc = 0;
     for (let i = 0; i < enc.length; i++) {
       const h = enc[i];
+      if (!cCli && (h === "CLIENTE" || h === "CLIENTES" || h === "EMPRESA")) cCli = i + 1;
       if (!cCod && (h === "CODIGO" || h === "COD" || h === "ITEM" || h === "SKU" || h === "REFERENCIA")) cCod = i + 1;
       if (!cAbc && (h === "ABC" || h === "CLASIFICACION" || h === "CLASE" || h === "CATEGORIA")) cAbc = i + 1;
     }
+    if (!cCli) cCli = 1; // A
     if (!cCod) cCod = 2; // B
     if (!cAbc) cAbc = 3; // C
-    res.colCodigo = cCod; res.colAbc = cAbc;
+    res.colCliente = cCli; res.colCodigo = cCod; res.colAbc = cAbc;
 
-    // Una sola lectura que abarque ambas columnas
-    const ini = Math.min(cCod, cAbc), fin = Math.max(cCod, cAbc);
-    const datos = hoja.getRange(2, ini, lr - 1, fin - ini + 1).getValues();
-    const iCod = cCod - ini, iAbc = cAbc - ini;
+    // Una sola lectura que abarque las tres columnas
+    const desde = Math.min(cCli, cCod, cAbc), hasta = Math.max(cCli, cCod, cAbc);
+    const datos = hoja.getRange(2, desde, lr - 1, hasta - desde + 1).getValues();
+    const iCli = cCli - desde, iCod = cCod - desde, iAbc = cAbc - desde;
 
-    const mapa = {};
+    // Filtro por cliente (opcional): sólo se cargan las filas que sirven a esta planilla.
+    let filtro = null;
+    if (ABC_CFG.FILTRAR_POR_CLIENTE && clientes && clientes.length) {
+      filtro = {};
+      clientes.forEach(c => { if (c) filtro[c] = true; });
+      if (!Object.keys(filtro).length) filtro = null;
+    }
+
+    const mapa = {}, global = {}, ambiguo = {};
     for (let i = 0; i < datos.length; i++) {
       const cod = normalizarCodigo_(datos[i][iCod]);
       const abc = normalizarABC_(datos[i][iAbc]);
       if (!cod || !abc) continue; // códigos sin ABC: los puede rellenar el TXT
-      if (mapa[cod] !== undefined && mapa[cod] !== abc) {
-        res.duplicados++;
-        if (res.ejemplosDup.length < 5) res.ejemplosDup.push(cod + " (" + mapa[cod] + "→" + abc + ")");
+      res.leidas++;
+
+      const cli = normalizarCliente_(datos[i][iCli]);
+      // Las filas sin cliente son genéricas y siempre se conservan.
+      if (filtro && cli && !filtro[cli]) continue;
+
+      if (cli) {
+        const clave = claveCatalogo_(cli, cod);
+        if (mapa[clave] !== undefined && mapa[clave] !== abc) {
+          res.duplicados++;
+          if (res.ejemplosDup.length < 5) res.ejemplosDup.push(cli + "/" + cod + " (" + mapa[clave] + "→" + abc + ")");
+        }
+        mapa[clave] = abc;
       }
-      mapa[cod] = abc;
+
+      // Índice por código suelto: sólo sirve si TODOS los clientes coinciden en
+      // la clasificación; si no, se descarta para no adivinar mal.
+      if (global[cod] === undefined) global[cod] = abc;
+      else if (global[cod] !== abc) {
+        ambiguo[cod] = true;
+        if (res.ejemplosAmb.length < 5) res.ejemplosAmb.push(cod);
+      }
       res.filas++;
     }
+    for (const cod in ambiguo) { delete global[cod]; res.ambiguos++; }
+
     res.mapa = Object.keys(mapa).length ? mapa : null;
-    if (!res.mapa) res.error = "La hoja maestra se leyó pero no produjo códigos válidos.";
+    res.global = Object.keys(global).length ? global : null;
+    if (!res.mapa && !res.global) res.error = "La hoja maestra se leyó pero no produjo códigos válidos.";
     return res;
   } catch (e) {
     console.error('leerMapaDesdeHoja_: ' + e);
@@ -482,11 +669,11 @@ function leerMapaDesdeHoja_() {
   }
 }
 
-// Respaldo: ABC2026.txt (JSON) de Google Drive. Se prefiere el ID configurado;
-// la búsqueda por nombre recorre TODO el Drive y puede tomar una copia vieja,
-// así que queda sólo como último recurso.
+// Respaldo: ABC2026.txt (JSON) de Google Drive, indexado sólo por código.
+// Se prefiere el ID configurado; la búsqueda por nombre recorre TODO el Drive y
+// puede tomar una copia vieja, así que queda sólo como último recurso.
 function leerMapaDesdeTxt_() {
-  const res = { mapa: null, filas: 0, duplicadosArchivo: 0, error: "" };
+  const res = { global: null, filas: 0, duplicadosArchivo: 0, error: "" };
   try {
     let archivo = null;
     if (ABC_CFG.TXT_FALLBACK_ID) {
@@ -504,13 +691,13 @@ function leerMapaDesdeTxt_() {
 
     const txt = archivo.getBlob().getDataAsString("UTF-8").replace(/^\uFEFF/, "");
     const json = JSON.parse(txt);
-    const mapa = {};
+    const global = {};
     for (const k in json) {
       const cod = normalizarCodigo_(k);
       const abc = normalizarABC_(json[k]);
-      if (cod && abc) { mapa[cod] = abc; res.filas++; }
+      if (cod && abc) { global[cod] = abc; res.filas++; }
     }
-    res.mapa = Object.keys(mapa).length ? mapa : null;
+    res.global = Object.keys(global).length ? global : null;
     return res;
   } catch (e) {
     console.error('leerMapaDesdeTxt_: ' + e);
@@ -644,67 +831,100 @@ function abcSnapshotLeer_() {
 // que la hoja NO tiene (ej. HYCITE). Orden de preferencia al resolver:
 //   caché (30 min) → hoja maestra + TXT → snapshot local
 // ==========================================
-function construirCatalogoABC_() {
-  const hoja = leerMapaDesdeHoja_();
+function construirCatalogoABC_(clientes) {
+  const hoja = leerMapaDesdeHoja_(clientes);
   const txt  = leerMapaDesdeTxt_();
 
-  if (!hoja.mapa && !txt.mapa) {
+  if (!hoja.mapa && !hoja.global && !txt.global) {
     return { payload: null, error: [hoja.error, txt.error].filter(String).join(" | ") };
   }
 
-  const mapa = Object.assign({}, txt.mapa || {}, hoja.mapa || {}); // la hoja sobrescribe
+  // El maestro manda sobre el TXT en el índice por código suelto.
+  const global = Object.assign({}, txt.global || {}, hoja.global || {});
+  const filtrado = !!(ABC_CFG.FILTRAR_POR_CLIENTE && clientes && clientes.length);
+
   const payload = {
     v: ABC_CFG.PAYLOAD_VERSION,
     ts: Date.now(),
-    mapa: mapa,
+    mapa: hoja.mapa || {},        // CLIENTE|CODIGO -> ABC
+    global: global,               // CODIGO -> ABC (sólo códigos no ambiguos)
+    clientes: filtrado ? clientes.slice() : [],  // [] = catálogo completo
     meta: {
-      totalCodigos: Object.keys(mapa).length,
-      desdeHoja: hoja.mapa ? Object.keys(hoja.mapa).length : 0,
-      desdeTxt: txt.mapa ? Object.keys(txt.mapa).length : 0,
+      porCliente: Object.keys(hoja.mapa || {}).length,
+      porCodigo: Object.keys(global).length,
+      filasMaestro: hoja.leidas,
+      desdeTxt: txt.filas,
       duplicadosHoja: hoja.duplicados,
       ejemplosDup: hoja.ejemplosDup,
+      ambiguos: hoja.ambiguos,
+      ejemplosAmb: hoja.ejemplosAmb,
+      colCliente: hoja.colCliente,
       colCodigo: hoja.colCodigo,
       colAbc: hoja.colAbc,
+      clientesFiltrados: filtrado ? clientes.slice() : [],
       errorHoja: hoja.error,
       errorTxt: txt.error,
-      fuente: hoja.mapa && txt.mapa ? "HOJA+TXT" : (hoja.mapa ? "HOJA" : "TXT")
+      fuente: (hoja.mapa || hoja.global) && txt.global ? "HOJA+TXT" : ((hoja.mapa || hoja.global) ? "HOJA" : "TXT")
     }
   };
   return { payload: payload, error: "" };
 }
 
-// Devuelve { mapa, alt, meta, origen }. forzar=true ignora la caché y relee.
-function obtenerCatalogoABC_(forzar) {
+// ¿El catálogo guardado sirve para los clientes de esta planilla? Un catálogo
+// filtrado deja de servir en cuanto aparece un cliente que no estaba cargado.
+function cubreClientes_(payloadClientes, clientes) {
+  if (!payloadClientes || !payloadClientes.length) return true; // catálogo completo
+  if (!clientes || !clientes.length) return false;
+  const set = {};
+  payloadClientes.forEach(c => { set[c] = true; });
+  for (let i = 0; i < clientes.length; i++) if (set[clientes[i]] !== true) return false;
+  return true;
+}
+
+function empaquetarCatalogo_(payload, origen, error) {
+  return {
+    mapa: payload.mapa || {},
+    global: payload.global || {},
+    alt: construirIndiceAlterno_(payload.global || {}),
+    meta: payload.meta || {},
+    clientes: payload.clientes || [],
+    ts: payload.ts || 0,
+    origen: origen,
+    error: error || ""
+  };
+}
+
+// Devuelve { mapa, global, alt, meta, origen }. forzar=true ignora la caché y relee.
+function obtenerCatalogoABC_(forzar, clientes) {
+  clientes = (clientes || []).filter(String);
+
   if (forzar) abcCacheBorrar_();
 
   if (!forzar) {
     const cacheado = abcCacheLeer_();
-    if (cacheado) {
-      return { mapa: cacheado.mapa, alt: construirIndiceAlterno_(cacheado.mapa),
-               meta: cacheado.meta || {}, ts: cacheado.ts, origen: "CACHE" };
+    if (cacheado && cubreClientes_(cacheado.clientes, clientes)) {
+      return empaquetarCatalogo_(cacheado, "CACHE");
     }
   }
 
-  const res = construirCatalogoABC_();
+  const res = construirCatalogoABC_(clientes);
   if (res.payload) {
     abcCacheGuardar_(res.payload);
     abcSnapshotGuardar_(res.payload);
-    return { mapa: res.payload.mapa, alt: construirIndiceAlterno_(res.payload.mapa),
-             meta: res.payload.meta, ts: res.payload.ts, origen: "FUENTES" };
+    return empaquetarCatalogo_(res.payload, "FUENTES");
   }
 
   // Ninguna fuente respondió: seguir trabajando con la última copia buena.
   const snap = abcSnapshotLeer_();
-  if (snap) {
-    return { mapa: snap.mapa, alt: construirIndiceAlterno_(snap.mapa),
-             meta: snap.meta || {}, ts: snap.ts, origen: "SNAPSHOT", error: res.error };
+  if (snap && cubreClientes_(snap.clientes, clientes)) {
+    return empaquetarCatalogo_(snap, "SNAPSHOT", res.error);
   }
-  return { mapa: null, alt: {}, meta: {}, ts: 0, origen: "NINGUNA", error: res.error };
+  return { mapa: {}, global: {}, alt: {}, meta: {}, clientes: [], ts: 0, origen: "NINGUNA", error: res.error };
 }
 
-// Compatibilidad: devuelve solo el mapa, como la versión anterior.
+// Compatibilidad: devuelve solo el índice por código, como la versión anterior.
 function obtenerMapaABC(forzar) {
-  return obtenerCatalogoABC_(forzar).mapa || {};
+  return obtenerCatalogoABC_(forzar, []).global || {};
 }
 
 // ==========================================
@@ -712,49 +932,65 @@ function obtenerMapaABC(forzar) {
 // Escritura DIFERENCIAL: antes se reescribía la columna F completa en cada evento
 // (miles de celdas por conteo) y, como toda escritura del script vuelve a disparar
 // onChange, el proceso se realimentaba. Ahora sólo se tocan los tramos que cambian
-// y, cuando no cambia nada, no se escribe: la cadena de eventos se corta sola.
+// y, cuando no cambia nada, no se escribe.
+// La búsqueda es CLIENTE+CODIGO → CODIGO → código sin ceros a la izquierda.
 // ==========================================
 function consolidarDatos(sheet, forzar) {
   const stats = { ok: false, filas: 0, celdas: 0, sinAbc: 0, sinAbcEjemplos: [],
-                  origen: "", totalCodigos: 0, mensaje: "" };
+                  origen: "", totalCodigos: 0, clientes: [], porCliente: 0, mensaje: "" };
   try {
-    if (!sheet) sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("PLANILLA DE CONTEO FISICO");
-    if (!sheet) { stats.mensaje = "No existe la hoja PLANILLA DE CONTEO FISICO."; return stats; }
+    if (!sheet) sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONTEO_CFG.PLANILLA);
+    if (!sheet) { stats.mensaje = "No existe la hoja " + CONTEO_CFG.PLANILLA + "."; return stats; }
 
     const lr = sheet.getLastRow();
     if (lr < 2) { stats.ok = true; stats.mensaje = "La planilla no tiene filas."; return stats; }
 
-    const cat = obtenerCatalogoABC_(forzar);
+    // UNA sola lectura para cliente (E), ABC actual (F) y código (G).
+    const desde = Math.min(ABC_CFG.COL_CLIENTE, ABC_CFG.COL_ABC, ABC_CFG.COL_CODIGO);
+    const hasta = Math.max(ABC_CFG.COL_CLIENTE, ABC_CFG.COL_ABC, ABC_CFG.COL_CODIGO);
+    const iCli = ABC_CFG.COL_CLIENTE - desde, iAbc = ABC_CFG.COL_ABC - desde, iCod = ABC_CFG.COL_CODIGO - desde;
+    const bloque = sheet.getRange(2, desde, lr - 1, hasta - desde + 1).getValues();
+
+    // Recortar la cola de filas sin código ni ABC (getLastRow() suele exceder los datos)
+    let n = bloque.length;
+    while (n > 0 && normalizarCodigo_(bloque[n - 1][iCod]) === "" && String(bloque[n - 1][iAbc]).trim() === "") n--;
+    if (n < 1) { stats.ok = true; return stats; }
+    stats.filas = n;
+
+    // Clientes presentes: con ellos se carga sólo la porción útil del maestro.
+    const setCli = {};
+    for (let i = 0; i < n; i++) {
+      const c = normalizarCliente_(bloque[i][iCli]);
+      if (c) setCli[c] = true;
+    }
+    stats.clientes = Object.keys(setCli);
+
+    const cat = obtenerCatalogoABC_(forzar, stats.clientes);
     stats.origen = cat.origen;
-    stats.totalCodigos = cat.mapa ? Object.keys(cat.mapa).length : 0;
-    if (!cat.mapa || !stats.totalCodigos) {
+    stats.totalCodigos = Object.keys(cat.global || {}).length;
+    stats.porCliente = Object.keys(cat.mapa || {}).length;
+    if (!stats.totalCodigos && !stats.porCliente) {
       // Sin catálogo NO se toca F: es preferible dejar el dato viejo que borrarlo.
       stats.mensaje = "No se pudo obtener el catálogo ABC. " + (cat.error || "");
       return stats;
     }
 
-    let n = lr - 1;
-    const codigos = sheet.getRange(2, ABC_CFG.COL_CODIGO, n, 1).getValues();
-    const actuales = sheet.getRange(2, ABC_CFG.COL_ABC, n, 1).getValues();
-
-    // Recortar la cola de filas sin código ni ABC (getLastRow() suele exceder los datos)
-    while (n > 0 && normalizarCodigo_(codigos[n - 1][0]) === "" && String(actuales[n - 1][0]).trim() === "") n--;
-    if (n < 1) { stats.ok = true; return stats; }
-    stats.filas = n;
-
     const nuevos = new Array(n);
     for (let i = 0; i < n; i++) {
-      const cod = normalizarCodigo_(codigos[i][0]);
-      const actual = actuales[i][0];
+      const cod = normalizarCodigo_(bloque[i][iCod]);
+      const actual = bloque[i][iAbc];
 
-      if (!cod) { nuevos[i] = ""; continue; }             // fila sin código: F vacía
+      if (!cod) { nuevos[i] = ""; continue; }   // fila sin código: F vacía
 
-      let abc = cat.mapa[cod];
-      if (abc === undefined) abc = cat.alt[claveAlterna_(cod)]; // respaldo por ceros
+      const cli = normalizarCliente_(bloque[i][iCli]);
+      let abc;
+      if (cli) abc = cat.mapa[claveCatalogo_(cli, cod)];           // 1) cliente + código
+      if (abc === undefined) abc = cat.global[cod];                 // 2) código (no ambiguo)
+      if (abc === undefined) abc = cat.alt[claveAlterna_(cod)];     // 3) sin ceros a la izquierda
 
       if (abc === undefined) {
         stats.sinAbc++;
-        if (stats.sinAbcEjemplos.length < 10) stats.sinAbcEjemplos.push(cod);
+        if (stats.sinAbcEjemplos.length < 10) stats.sinAbcEjemplos.push((cli ? cli + "/" : "") + cod);
         // No destruir lo que ya estaba clasificado
         abc = (ABC_CFG.PRESERVAR_SIN_MATCH && String(actual).trim() !== "")
           ? actual : ABC_CFG.ETIQUETA_SIN_ABC;
@@ -765,7 +1001,7 @@ function consolidarDatos(sheet, forzar) {
     // Detectar tramos contiguos con cambios reales
     const tramos = [];
     for (let i = 0; i < n; i++) {
-      if (String(nuevos[i]) !== String(actuales[i][0])) {
+      if (String(nuevos[i]) !== String(bloque[i][iAbc])) {
         stats.celdas++;
         const ult = tramos[tramos.length - 1];
         if (ult && i === ult.fin + 1) ult.fin = i; else tramos.push({ ini: i, fin: i });
@@ -778,8 +1014,8 @@ function consolidarDatos(sheet, forzar) {
       sheet.getRange(2, ABC_CFG.COL_ABC, n, 1).setValues(nuevos.map(v => [v]));
     } else {
       tramos.forEach(t => {
-        const bloque = nuevos.slice(t.ini, t.fin + 1).map(v => [v]);
-        sheet.getRange(2 + t.ini, ABC_CFG.COL_ABC, bloque.length, 1).setValues(bloque);
+        const bloqueF = nuevos.slice(t.ini, t.fin + 1).map(v => [v]);
+        sheet.getRange(2 + t.ini, ABC_CFG.COL_ABC, bloqueF.length, 1).setValues(bloqueF);
       });
     }
 
@@ -806,16 +1042,17 @@ function actualizarABCManual() {
     ss.toast("No se pudo actualizar el ABC. " + (st.mensaje || ""), "⛔ WMS", 10);
     return;
   }
-  const msg = "Fuente: " + st.origen + " · Catálogo: " + st.totalCodigos +
-              " códigos · Celdas actualizadas: " + st.celdas +
+  const msg = "Fuente: " + st.origen +
+              " · Catálogo: " + st.porCliente + " por cliente / " + st.totalCodigos + " por código" +
+              " · Celdas actualizadas: " + st.celdas +
               (st.sinAbc ? " · Sin ABC: " + st.sinAbc : "");
   ss.toast(msg, "✅ ABC actualizado", 8);
 }
 
 // "Diagnóstico ABC": muestra de dónde salió el catálogo y qué códigos no clasifican.
 function diagnosticoABC() {
-  const cat = obtenerCatalogoABC_(true);
-  const st = consolidarDatos(null, false); // ya viene de caché recién escrita
+  const st = consolidarDatos(null, true);          // relee el maestro y pinta F
+  const cat = obtenerCatalogoABC_(false, st.clientes); // el catálogo recién cacheado
   const m = cat.meta || {};
   const edadMin = cat.ts ? Math.round((Date.now() - cat.ts) / 60000) : "-";
 
@@ -824,10 +1061,15 @@ function diagnosticoABC() {
     "",
     "Origen del catálogo: " + cat.origen + (cat.origen === "SNAPSHOT" ? "  ⚠️ (maestro no accesible)" : ""),
     "Antigüedad de los datos: " + edadMin + " min",
-    "Códigos totales: " + (cat.mapa ? Object.keys(cat.mapa).length : 0),
-    "  · desde la hoja maestra: " + (m.desdeHoja || 0),
+    "Clientes de esta planilla: " + (st.clientes.length ? st.clientes.join(", ") : "(ninguno en la columna E)"),
+    (cat.clientes && cat.clientes.length) ? "Catálogo filtrado por cliente: SÍ" : "Catálogo filtrado por cliente: NO (completo)",
+    "",
+    "Entradas CLIENTE+CODIGO: " + (m.porCliente || 0),
+    "Entradas por código suelto: " + (m.porCodigo || 0),
+    "Filas leídas del maestro: " + (m.filasMaestro || 0),
     "  · desde " + ABC_CFG.TXT_FALLBACK_NAME + ": " + (m.desdeTxt || 0),
-    "Columnas detectadas en el maestro: código=" + (m.colCodigo || "?") + ", abc=" + (m.colAbc || "?"),
+    "Columnas detectadas en el maestro: cliente=" + (m.colCliente || "?") +
+      ", código=" + (m.colCodigo || "?") + ", abc=" + (m.colAbc || "?"),
     "",
     "PLANILLA",
     "Filas evaluadas: " + st.filas,
@@ -835,8 +1077,10 @@ function diagnosticoABC() {
     "Códigos sin ABC: " + st.sinAbc,
     st.sinAbcEjemplos.length ? "  ej.: " + st.sinAbcEjemplos.join(", ") : "",
     "",
-    m.duplicadosHoja ? "⚠️ Códigos duplicados con ABC distinto en el maestro: " + m.duplicadosHoja : "Sin duplicados conflictivos en el maestro.",
+    m.duplicadosHoja ? "⚠️ Mismo CLIENTE+CODIGO con ABC distinto en el maestro: " + m.duplicadosHoja : "Sin duplicados conflictivos en el maestro.",
     (m.ejemplosDup && m.ejemplosDup.length) ? "  ej.: " + m.ejemplosDup.join(", ") : "",
+    m.ambiguos ? "ℹ️ Códigos con ABC distinto entre clientes: " + m.ambiguos + " (se resuelven por cliente)" : "",
+    (m.ejemplosAmb && m.ejemplosAmb.length) ? "  ej.: " + m.ejemplosAmb.join(", ") : "",
     m.errorHoja ? "⚠️ Hoja maestra: " + m.errorHoja : "",
     m.errorTxt ? "⚠️ Respaldo TXT: " + m.errorTxt : ""
   ].filter(l => l !== "");
@@ -857,16 +1101,18 @@ function menuActualizarRegistro() {
 }
 
 function forzarInicializacionManual() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("PLANILLA DE CONTEO FISICO");
-  if (sheet) {
-    verificarConfiguracionInicial(sheet);
-    generarSecuenciaColumnaD(sheet);
-    verificarYActualizarColumnaB(sheet);
-    consolidarDatos(sheet, true); // el botón "Forzar TODO" sí relee el catálogo
-    actualizarAnalisis();
-    respaldarProtegidas(sheet); // deja una copia base de las columnas protegidas
+  // Mismo pipeline que usan los gatillos, pero ignorando la firma y releyendo
+  // el catálogo ABC del archivo maestro.
+  const res = procesarConteo_({ forzar: true, forzarABC: true, motivo: 'FORZADO_MANUAL' });
+  if (res.motivo === 'LOCK') {
+    SpreadsheetApp.getUi().alert("⏳ El archivo está procesando otro conteo en este momento.\n\nEspere unos segundos y vuelva a intentarlo.");
+    return;
   }
-  SpreadsheetApp.getUi().alert("✅ Datos Inicializados y Sincronizados.");
+  SpreadsheetApp.getUi().alert(
+    "✅ Datos Inicializados y Sincronizados." +
+    (res.primerConteo ? "\n\n🚩 Se registró el inicio del inventario (fecha en A, ID en C y secuencia en D)." : "") +
+    "\n\nConteos detectados en V, W y X: " + res.conteos
+  );
 }
 
 // ==========================================
@@ -970,10 +1216,10 @@ function rutinaDeFondoMaestra() {
     }
 
     // 2. MIENTRAS ESTÉ ACTIVO (Hay operarios trabajando)
-    actualizarAnalisis();
-    // La rutina de fondo es el único punto que RELEE el catálogo del maestro
-    // (cada 30 min). Los eventos de conteo trabajan siempre desde caché/snapshot.
-    consolidarDatos(null, true);
+    // Se llama a ejecutarPipeline_ (sin lock propio) porque esta rutina YA tomó
+    // el lock del script. Es el único punto periódico que relee el catálogo del
+    // maestro: los conteos trabajan siempre desde caché/snapshot.
+    ejecutarPipeline_({ forzar: true, forzarABC: true, actividad: false, motivo: 'FONDO' });
     actualizarRegistro();
   } catch (e) {
     console.error('rutinaDeFondoMaestra: ' + e);
