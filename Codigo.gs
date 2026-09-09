@@ -163,6 +163,7 @@ function onOpen() {
     .addItem('Actualizar Análisis', 'menuActualizarAnalisis')
     .addItem('Actualizar ABC', 'actualizarABCManual')
     .addItem('Diagnóstico ABC', 'diagnosticoABC')
+    .addItem('Verificar accesos', 'menuVerificarAccesos')
     .addItem('Actualizar Registro', 'menuActualizarRegistro')
     .addToUi();
 }
@@ -200,6 +201,11 @@ function instalarTriggersEnCopia() {
   PropertiesService.getScriptProperties().setProperty(claveProp_('WMS_LAST_INTERACTION'), Date.now().toString());
   PropertiesService.getScriptProperties().setProperty(claveProp_('WMS_SYSTEM_SLEEPING'), 'false');
 
+  // Los triggers corren CON LA CUENTA de quien activa. Se comprueba aquí mismo
+  // que esa cuenta pueda leer el catálogo: es el momento en que el operario
+  // puede hacer algo al respecto, no cuando ya está contando.
+  const acc = verificarAccesos_();
+
   SpreadsheetApp.getUi().alert(
     "✅ ¡ARCHIVO ACTIVADO CON ÉXITO!\n\n" +
     "El sistema está escuchando a la Terminal WMS y a las capturas hechas a mano.\n\n" +
@@ -207,7 +213,13 @@ function instalarTriggersEnCopia() {
     "  • Columna A: fecha y hora de inicio del inventario\n" +
     "  • Columna C: ID del inventario\n" +
     "  • Columna D: secuencia\n" +
-    "  • Columna F: clasificación ABC (leída del archivo maestro)"
+    "  • Columna F: clasificación ABC (leída del archivo maestro)\n\n" +
+    (acc.ok
+      ? "🔑 Accesos verificados: el ABC puede leerse con su cuenta."
+      : "⛔ ATENCIÓN: su cuenta NO puede leer el catálogo ABC.\n" +
+        acc.maestroMsg + "\n\n" +
+        "El resto del archivo funciona igual, pero la columna F no se llenará hasta " +
+        "que tenga acceso de LECTOR al archivo maestro.")
   );
 
   forzarInicializacionManual();
@@ -330,6 +342,7 @@ function ejecutarPipeline_(opciones) {
   // La marca se guarda sólo si de verdad se leyeron las fuentes: si el maestro
   // estaba caído y se resolvió con el snapshot, se reintenta en la próxima vuelta.
   if (abc && abc.origen === "FUENTES") prop.setProperty(kAbc, String(Date.now()));
+  if (abc && abc.ok === false) avisarProblemaABC_(ss, abc, prop);
   actualizarAnalisis();
   respaldarProtegidas(planilla);           // copia de las columnas protegidas
 
@@ -395,6 +408,84 @@ function alRegistrarConteo(e) {
   }
 }
 
+
+// ==========================================
+// 2.a VERIFICACIÓN DE ACCESOS
+// Cada copia del archivo base pertenece al operario que la creó, así que los
+// triggers corren CON SU CUENTA. Si ese operario no tiene acceso de lectura al
+// archivo maestro, el ABC no se puede leer. Antes eso fallaba en silencio;
+// ahora se detecta y se avisa con el nombre exacto de lo que falta.
+// ==========================================
+function verificarAccesos_() {
+  const r = { maestro: false, maestroMsg: "", txt: false, txtMsg: "", ok: false, usuario: "" };
+
+  try { r.usuario = Session.getActiveUser().getEmail() || ""; } catch (e) {}
+
+  try {
+    const master = SpreadsheetApp.openById(ABC_CFG.MASTER_ID);
+    const nombre = master.getName();
+    let hoja = master.getSheetByName(ABC_CFG.MASTER_SHEET);
+    if (!hoja) {
+      hoja = master.getSheets().filter(h => normalizarEncabezado_(h.getName()).indexOf("CRONOGRAMA") >= 0)[0];
+    }
+    if (hoja) {
+      r.maestro = true;
+      r.maestroMsg = "OK · " + nombre + " → hoja " + hoja.getName();
+    } else {
+      r.maestroMsg = "Se abre " + nombre + " pero no tiene la hoja " + ABC_CFG.MASTER_SHEET;
+    }
+  } catch (e) {
+    r.maestroMsg = "SIN ACCESO al archivo maestro. Solicite permiso de Lector sobre el archivo con ID " + ABC_CFG.MASTER_ID;
+  }
+
+  try {
+    let archivo = null;
+    if (ABC_CFG.TXT_FALLBACK_ID) archivo = DriveApp.getFileById(ABC_CFG.TXT_FALLBACK_ID);
+    else {
+      const it = DriveApp.getFilesByName(ABC_CFG.TXT_FALLBACK_NAME);
+      while (it.hasNext() && !archivo) { const f = it.next(); if (!f.isTrashed()) archivo = f; }
+    }
+    if (archivo) { r.txt = true; r.txtMsg = "OK · " + archivo.getName(); }
+    else r.txtMsg = "No se encontró " + ABC_CFG.TXT_FALLBACK_NAME + " en su Drive (respaldo opcional)";
+  } catch (e) {
+    r.txtMsg = "SIN ACCESO a " + ABC_CFG.TXT_FALLBACK_NAME + " (respaldo opcional)";
+  }
+
+  r.ok = r.maestro || r.txt; // con una sola fuente el ABC ya funciona
+  return r;
+}
+
+// Menú "Verificar accesos": el operario comprueba por sí mismo si su cuenta
+// puede leer el catálogo, sin tener que esperar a que falle un conteo.
+function menuVerificarAccesos() {
+  const a = verificarAccesos_();
+  SpreadsheetApp.getUi().alert(
+    "🔑 ACCESOS DE SU CUENTA" + (a.usuario ? "\n" + a.usuario : "") + "\n\n" +
+    (a.maestro ? "✅" : "⛔") + " Archivo maestro (CRONOGRAMA_CODIGOS)\n     " + a.maestroMsg + "\n\n" +
+    (a.txt ? "✅" : "⚠️") + " Respaldo " + ABC_CFG.TXT_FALLBACK_NAME + "\n     " + a.txtMsg + "\n\n" +
+    (a.ok ? "El ABC puede actualizarse con normalidad."
+          : "⛔ El ABC NO se puede actualizar: pida acceso de LECTOR al archivo maestro y vuelva a probar.")
+  );
+}
+
+// Aviso no intrusivo cuando el catálogo no se puede leer. Se muestra a quien
+// tenga el archivo abierto y como máximo una vez por hora, para no molestar.
+function avisarProblemaABC_(ss, abc, prop) {
+  try {
+    const clave = claveProp_('WMS_AVISO_ABC', ss);
+    const ultimo = parseInt(prop.getProperty(clave), 10) || 0;
+    if (Date.now() - ultimo < 3600000) return;
+    prop.setProperty(clave, String(Date.now()));
+
+    const a = verificarAccesos_();
+    ss.toast(
+      a.maestro ? ("No se pudo actualizar el ABC. " + (abc.mensaje || ""))
+                : "Su cuenta no tiene acceso al archivo maestro del ABC. Use ⚙️ Inventarios WMS → Verificar accesos.",
+      "⚠️ ABC sin actualizar", 15);
+  } catch (e) {
+    console.error('avisarProblemaABC_: ' + e);
+  }
+}
 
 // ==========================================
 // 2.b API PARA LA TERMINAL WMS

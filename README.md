@@ -10,6 +10,7 @@ Archivo base para generación de inventarios (Google Apps Script del archivo hij
 | `docs/ANALISIS_ABC.md` | Análisis detallado del flujo de actualización ABC: fallas encontradas, causa y corrección aplicada. |
 | `docs/DISPARO_POR_CONTEO.md` | Disparo automático con el conteo en V/W/X: gatillos, firma de estado y arranque del inventario (A, C, D, F). |
 | `docs/INTEGRACION_TERMINAL_WMS.md` | Cómo llamar al motor desde la Terminal WMS para que el operario nunca abra el archivo real. |
+| `docs/COPIAS_Y_PERMISOS.md` | Copias creadas por el operario: permisos que necesita su cuenta y por qué la autorización es por copia. |
 | `tests/` | Pruebas en Node del comportamiento puro del ABC (normalización, índice alterno, escritura diferencial). |
 
 ## Arranque del inventario
@@ -72,6 +73,7 @@ node tests/test_catalogo.js    # lectura de CRONOGRAMA_CODIGOS y filtro por clie
 node tests/test_columnas.js    # columnas A, C y D: replicación sin reescribir de más
 node tests/test_api.js         # actualizarInventario() y aislamiento entre inventarios
 node tests/test_auditoria.js   # REGISTRO con varios operarios contando a la vez
+node tests/test_accesos.js     # verificación de accesos al catálogo por cuenta
 ```
 
 Cargan `Codigo.gs` en un contexto aislado con los servicios de Google simulados, por lo que
