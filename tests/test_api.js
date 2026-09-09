@@ -4,12 +4,14 @@ const ctx = cargarScript();
 const t = comprobador(), eq = t.eq;
 
 let lockLibre = true, abierto = null;
+const K = (base, id) => base + ':' + id;
 function montar(id, filas) {
   const planilla = hojaFalsa('PLANILLA DE CONTEO FISICO', filas);
   const props = {};
   ctx.PropertiesService.getScriptProperties = () => ({
     getProperty: k => (k in props ? props[k] : null),
-    setProperty: (k, v) => { props[k] = String(v); }
+    setProperty: (k, v) => { props[k] = String(v); },
+    deleteProperty: k => { delete props[k]; }
   });
   ctx.LockService.getScriptLock = () => ({ tryLock: () => lockLibre, releaseLock: () => {} });
   ctx.SpreadsheetApp.openById = (pedido) => {
@@ -54,13 +56,19 @@ eq(r.exito, false, 'un ID invalido no rompe la Terminal');
 eq(r.mensaje.indexOf('No se encontró') >= 0, true, 'explica el motivo');
 eq(ctx.evaluar('SS_CTX_'), null, 'tampoco deja contexto colgado tras un error');
 
-// --- Archivo ocupado por otro inventario ---
-montar('ID-2', [fila({ codigo: 'B1', v: 1 })]);
+// --- Otro conteo en curso: queda en cola, NO es un fallo para el operario ---
+// (varios operarios cuentan a la vez en el mismo archivo)
+m = montar('ID-2', [fila({ codigo: 'B1', v: 1 })]);
 lockLibre = false;
 r = ctx.actualizarInventario('ID-2');
-eq([r.exito, r.ejecutado], [false, false], 'no da por procesado lo que no se proceso');
-eq(r.mensaje.indexOf('ocupado') >= 0, true, 'avisa que el conteo ya quedo escrito');
+eq([r.exito, r.ejecutado, r.pendiente], [true, false, true], 'esperar turno no se reporta como error');
+eq(m.props[K('WMS_ACTUALIZACION_PENDIENTE', 'ID-2')], '1', 'deja marcada la actualizacion pendiente');
+
+// La corrida siguiente la procesa aunque la firma no haya cambiado
 lockLibre = true;
+r = ctx.actualizarInventario('ID-2');
+eq(r.ejecutado, true, 'la corrida siguiente recupera la actualizacion pendiente');
+eq(m.props[K('WMS_ACTUALIZACION_PENDIENTE', 'ID-2')], undefined, 'y limpia la marca');
 
 // --- Clave de caché por conjunto de clientes ---
 const clave = c => ctx.claveCacheABC_(c);

@@ -197,6 +197,34 @@ de dos lecturas separadas de F y G.
 
 ---
 
+## 4.b Varios operarios en el mismo archivo
+
+Todos los operarios son editores del archivo y cuentan al mismo tiempo. Tres
+cosas lo hacen seguro:
+
+**Permisos: se piden una sola vez, o ninguna.** Los triggers **instalables**
+(`alRegistrarConteo` y `manejadorCambiosExternos`) corren siempre **como el
+usuario que los instaló**, no como quien edita. Si el propietario ejecuta
+`ACTIVAR ARCHIVO`, la actualización corre con sus permisos para todos: **los
+operarios no ven ninguna pantalla de autorización**. Lo único que corre como el
+operario es el `onEdit` simple —las protecciones de columnas— y ése no necesita
+autorización alguna.
+
+**Nada se pierde por esperar turno.** El lock serializa las corridas para que dos
+no escriban las mismas columnas a la vez. Si una corrida no alcanza su turno,
+**no se descarta**: deja la marca `WMS_ACTUALIZACION_PENDIENTE` y la corrida
+siguiente —otro conteo, la rutina de fondo o la siguiente llamada de la
+Terminal— procesa igual, aunque la firma no haya cambiado. Por eso quedar en
+cola **no se reporta como error**: el conteo ya está escrito y la actualización
+está garantizada.
+
+**Los registros de auditoría ya no se pisan.** `registrarAuditoria()` calculaba
+`getLastRow() + 1` y después escribía. Dos conteos simultáneos obtenían la misma
+fila y uno sobrescribía al otro, perdiendo un registro. Ahora se usa
+`appendRow()`, que agrega al final en una sola operación, con la fecha y la hora
+ya calculadas: cada conteo cae en su propia fila sin importar cuántos lleguen a
+la vez.
+
 ## 5. Cada cuánto se relee el archivo maestro
 
 `ABC_CFG.REFRESCO_MIN` (por defecto **60 minutos**; poner `120` para dos horas).

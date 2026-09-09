@@ -15,7 +15,8 @@ function montar(filas, filasRegistro, id) {
   const llamadas = [];
   ctx.PropertiesService.getScriptProperties = () => ({
     getProperty: k => (k in props ? props[k] : null),
-    setProperty: (k, v) => { props[k] = String(v); }
+    setProperty: (k, v) => { props[k] = String(v); },
+    deleteProperty: k => { delete props[k]; }
   });
   ctx.SpreadsheetApp.getActiveSpreadsheet = () => ({
     getName: () => 'INV-01',
@@ -142,5 +143,16 @@ ctx.ejecutarPipeline_({ motivo: 'T1' });
 const propsCompartidas = m.props;
 eq(propsCompartidas[K('WMS_INVENTARIO_INICIADO', 'ARCHIVO-1')], 'true', 'marca el arranque del archivo 1');
 eq(propsCompartidas[K('WMS_INVENTARIO_INICIADO', 'ARCHIVO-2')], undefined, 'el archivo 2 no hereda el arranque del 1');
+
+// --- Una actualización que se quedó sin turno se recupera en la corrida siguiente ---
+m = montar([fila({ codigo: 'A1', v: 1 })], 1);
+ctx.ejecutarPipeline_({ motivo: 'C1' });          // deja la firma al día
+m.llamadas.length = 0;
+eq(ctx.ejecutarPipeline_({ motivo: 'C2' }).ejecutado, false, 'sin novedades no recalcula');
+
+m.props[K('WMS_ACTUALIZACION_PENDIENTE')] = '1';  // otra corrida se quedó sin turno
+m.llamadas.length = 0;
+eq(ctx.ejecutarPipeline_({ motivo: 'C3' }).ejecutado, true, 'con marca pendiente recalcula igual');
+eq(m.props[K('WMS_ACTUALIZACION_PENDIENTE')], undefined, 'y consume la marca');
 
 t.fin();

@@ -71,6 +71,7 @@ node tests/test_disparo.js     # firma de estado, arranque del inventario y gati
 node tests/test_catalogo.js    # lectura de CRONOGRAMA_CODIGOS y filtro por cliente
 node tests/test_columnas.js    # columnas A, C y D: replicación sin reescribir de más
 node tests/test_api.js         # actualizarInventario() y aislamiento entre inventarios
+node tests/test_auditoria.js   # REGISTRO con varios operarios contando a la vez
 ```
 
 Cargan `Codigo.gs` en un contexto aislado con los servicios de Google simulados, por lo que

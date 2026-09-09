@@ -109,6 +109,12 @@ const CONTEO_CFG = {
   PROP_FIRMA: "WMS_FIRMA_CONTEOS",     // último estado ya procesado
   PROP_INICIO: "WMS_INVENTARIO_INICIADO",
   PROP_ABC_LEIDO: "WMS_ABC_ULTIMA_LECTURA", // última lectura real del maestro
+  PROP_PENDIENTE: "WMS_ACTUALIZACION_PENDIENTE",
+
+  // Cuánto espera un gatillo por su turno antes de dejar la actualización
+  // pendiente. Con varios operarios en el mismo archivo las corridas se
+  // encadenan: como cada una dura ~1 s, 10 s alcanzan de sobra.
+  ESPERA_LOCK: 10000,
 
   // Qué se escribe en la columna C al arrancar el inventario:
   // 'NOMBRE' = nombre del archivo (comportamiento actual, es lo que lee Power BI)
@@ -276,11 +282,17 @@ function ejecutarPipeline_(opciones) {
   const kFirma  = claveProp_(CONTEO_CFG.PROP_FIRMA, ss);
   const kInicio = claveProp_(CONTEO_CFG.PROP_INICIO, ss);
   const kAbc    = claveProp_(CONTEO_CFG.PROP_ABC_LEIDO, ss);
+  const kPend   = claveProp_(CONTEO_CFG.PROP_PENDIENTE, ss);
   const estado = firmaConteos_(planilla, ss.getSheetByName("REGISTRO"));
   res.conteos = estado.conteos;
 
+  // Si una corrida anterior se quedó sin turno, ésta procesa igual aunque la
+  // firma no haya cambiado: así ninguna actualización se pierde.
+  const habiaPendiente = prop.getProperty(kPend) === '1';
+  if (habiaPendiente) prop.deleteProperty(kPend);
+
   // Sin conteos nuevos (ni filas nuevas de REGISTRO) no se recalcula nada.
-  if (!opciones.forzar && prop.getProperty(kFirma) === estado.firma) return res;
+  if (!opciones.forzar && !habiaPendiente && prop.getProperty(kFirma) === estado.firma) return res;
 
   // Despertar el sistema y registrar la hora de la actividad. La rutina de fondo
   // pasa actividad:false — si se marcara a sí misma como actividad, el archivo
@@ -335,8 +347,16 @@ function procesarConteo_(opciones) {
   // El lock es POR PROYECTO: cuando la Terminal atiende varios inventarios a la
   // vez conviene esperar más (opciones.esperaLock) en lugar de descartar la
   // actualización de un archivo porque otro se estaba procesando.
-  if (!lock.tryLock(opciones.esperaLock || 3000)) {
-    return { ejecutado: false, primerConteo: false, conteos: 0, motivo: 'LOCK', abc: null };
+  if (!lock.tryLock(opciones.esperaLock || CONTEO_CFG.ESPERA_LOCK)) {
+    // No se perdió nada: queda marcado como pendiente y la próxima corrida
+    // (otro conteo, la rutina de fondo o la siguiente llamada de la Terminal)
+    // lo procesa ignorando la firma. El operario no tiene que hacer nada.
+    try {
+      PropertiesService.getScriptProperties().setProperty(claveProp_(CONTEO_CFG.PROP_PENDIENTE), '1');
+    } catch (e) {
+      console.error('procesarConteo_ (pendiente): ' + e);
+    }
+    return { ejecutado: false, primerConteo: false, conteos: 0, motivo: 'LOCK', pendiente: true, abc: null };
   }
   try {
     return ejecutarPipeline_(opciones);
@@ -394,7 +414,7 @@ function actualizarInventario(idArchivo, opciones) {
   opciones = opciones || {};
   const t0 = Date.now();
   const salida = { exito: false, idArchivo: idArchivo || "", ejecutado: false,
-                   primerConteo: false, conteos: 0, abc: null, ms: 0, mensaje: "" };
+                   primerConteo: false, conteos: 0, pendiente: false, abc: null, ms: 0, mensaje: "" };
   try {
     if (!idArchivo) { salida.mensaje = "Falta el ID del archivo de inventario."; return salida; }
 
@@ -412,7 +432,11 @@ function actualizarInventario(idArchivo, opciones) {
       salida.ejecutado = res.ejecutado;
       salida.primerConteo = res.primerConteo;
       salida.conteos = res.conteos;
-      salida.exito = (res.motivo !== 'LOCK' && res.motivo !== 'ERROR');
+      salida.pendiente = !!res.pendiente;
+      // Quedar en cola NO es un fallo: el conteo está escrito y la actualización
+      // quedó marcada como pendiente, así que la procesa la corrida siguiente.
+      // Sólo se reporta error cuando de verdad algo salió mal.
+      salida.exito = (res.motivo !== 'ERROR');
 
       if (res.abc) {
         salida.abc = { origen: res.abc.origen, celdas: res.abc.celdas,
@@ -420,7 +444,7 @@ function actualizarInventario(idArchivo, opciones) {
                        clientes: res.abc.clientes };
       }
       if (res.motivo === 'LOCK') {
-        salida.mensaje = "El archivo estaba ocupado. El conteo ya quedó escrito y se procesará en la siguiente llamada.";
+        salida.mensaje = "Otro conteo se estaba procesando. Éste quedó en cola y se aplica en la corrida siguiente; no hay nada que hacer.";
       } else if (res.motivo === 'ERROR') {
         salida.mensaje = "No se pudo completar la actualización. Revise los registros de ejecución.";
       }
@@ -1342,7 +1366,10 @@ function forzarInicializacionManual() {
   // el catálogo ABC del archivo maestro.
   const res = procesarConteo_({ forzar: true, forzarABC: true, motivo: 'FORZADO_MANUAL' });
   if (res.motivo === 'LOCK') {
-    SpreadsheetApp.getUi().alert("⏳ El archivo está procesando otro conteo en este momento.\n\nEspere unos segundos y vuelva a intentarlo.");
+    SpreadsheetApp.getUi().alert(
+      "⏳ Otro conteo se está procesando en este momento.\n\n" +
+      "La actualización quedó en cola y se aplica sola en unos segundos. " +
+      "No hace falta repetir nada.");
     return;
   }
   SpreadsheetApp.getUi().alert(
@@ -1487,21 +1514,25 @@ function registrarAuditoria(sheet, row, cantidad, colIndex, obs, userEmail) {
   // el archivo). Aquí solo formateamos con "America/Guayaquil" para evitar la escritura
   // repetida de setSpreadsheetTimeZone en cada conteo (cuota).
   const vals = sheet.getRange(row, 1, 1, 20).getValues()[0];
-  const nextRow = regSheet.getLastRow() + 1;
-  let nombreUsuario = USUARIOS_MAP[userEmail] ? USUARIOS_MAP[userEmail] : (userEmail.split('@')[0] || "Operador");
+  const nombreUsuario = USUARIOS_MAP[userEmail] ? USUARIOS_MAP[userEmail] : (userEmail.split('@')[0] || "Operador");
 
-  regSheet.getRange(nextRow, 1, 1, 15).setValues([[
-    new Date(), "", "", "", nombreUsuario,
+  // CONCURRENCIA: varios operarios cuentan en el MISMO archivo al mismo tiempo.
+  // Antes se calculaba getLastRow()+1 y luego se escribía: dos conteos
+  // simultáneos obtenían la misma fila y uno pisaba al otro, perdiendo un
+  // registro de auditoría. appendRow() agrega al final en una sola operación,
+  // así cada conteo cae en su propia fila sin importar cuántos lleguen a la vez.
+  // La fecha y la hora se calculan ANTES de escribir, así la fila sale completa
+  // de una sola vez (ya no hay que releer la celda para rellenar B y C).
+  const ts = new Date();
+  const tz = "America/Guayaquil";
+  regSheet.appendRow([
+    ts,
+    Utilities.formatDate(ts, tz, "dd/MM/yy"),
+    Utilities.formatDate(ts, tz, "HH:mm:ss"),
+    "", nombreUsuario,
     vals[2], vals[4], vals[6], vals[14], vals[17], vals[19],
     (colIndex===22 ? cantidad : ""), (colIndex===23 ? cantidad : ""), (colIndex===24 ? cantidad : ""), obs
-  ]]);
-
-  const ts = regSheet.getRange(nextRow, 1).getValue();
-  if (ts instanceof Date) {
-    const tz = "America/Guayaquil";
-    regSheet.getRange(nextRow, 2).setValue(Utilities.formatDate(ts, tz, "dd/MM/yy"));
-    regSheet.getRange(nextRow, 3).setValue(Utilities.formatDate(ts, tz, "HH:mm:ss"));
-  }
+  ]);
 
   // Registrar el tiempo del conteo en la hoja TIEMPOS (usa el inicio marcado por
   // la Terminal si existe; si es un conteo digitado sin inicio, queda VALIDO=NO).

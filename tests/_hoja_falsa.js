@@ -26,6 +26,7 @@ function hojaFalsa(nombre, matriz) {
     nombre, escrituras, datos,
     getName: () => nombre,
     getLastRow: () => datos.length + 1,
+    appendRow: (valores) => { datos.push(valores.slice()); escrituras.push({ append: true, n: 1 }); return hoja; },
     getRange: function (a, b, c, d) {
       if (typeof a === 'string') {
         const m = a.match(/^([A-Z])(\d+)(?::([A-Z])(\d+))?$/);

@@ -98,12 +98,16 @@ inventario, última lectura del maestro) se guarda con el ID del archivo. El
 catálogo ABC en caché se indexa por el conjunto de clientes: dos inventarios del
 mismo cliente comparten catálogo, y los de clientes distintos no se pisan.
 
-**Concurrencia.** El lock de Apps Script es por proyecto: si dos operarios
-cuentan a la vez en archivos distintos, uno espera al otro. Por eso la llamada
-desde la Terminal espera hasta 30 s (`opciones.esperaLock`) en vez de descartar
-la actualización. Si aun así no alcanza el turno, `exito` viene en `false` con
-un mensaje claro — **el conteo ya quedó escrito** y se procesa en la llamada
-siguiente.
+**Concurrencia.** El lock de Apps Script es por proyecto: las corridas se
+encadenan para que dos no escriban las mismas columnas a la vez. La llamada
+desde la Terminal espera hasta 30 s por su turno (`opciones.esperaLock`).
+
+Si aun así no alcanza, **no se pierde nada ni se reporta un error**: la
+actualización queda marcada como pendiente y la corrida siguiente la procesa
+aunque la firma no haya cambiado. La respuesta trae `exito: true` con
+`pendiente: true`, para que la Terminal **no muestre nada al operario** — el
+conteo está escrito y la actualización está garantizada. Sólo hay que mostrar
+mensaje cuando `exito` viene en `false`.
 
 **Idempotencia.** Si no hay conteos nuevos, `actualizarInventario` no escribe
 nada y responde en aproximadamente un segundo. Se puede llamar de más sin costo.
