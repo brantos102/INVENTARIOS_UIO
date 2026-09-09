@@ -110,6 +110,8 @@ const CONTEO_CFG = {
   PROP_INICIO: "WMS_INVENTARIO_INICIADO",
   PROP_ABC_LEIDO: "WMS_ABC_ULTIMA_LECTURA", // última lectura real del maestro
   PROP_PENDIENTE: "WMS_ACTUALIZACION_PENDIENTE",
+  PROP_ACTIVADO_POR: "WMS_ACTIVADO_POR",   // cuenta dueña de los triggers
+  PROP_ACTIVADO_EN: "WMS_ACTIVADO_EN",
 
   // Cuánto espera un gatillo por su turno antes de dejar la actualización
   // pendiente. Con varios operarios en el mismo archivo las corridas se
@@ -170,10 +172,34 @@ function onOpen() {
 
 function instalarTriggersEnCopia() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet();
-  const triggers = ScriptApp.getProjectTriggers();
+  const ui = SpreadsheetApp.getUi();
+  const prop = PropertiesService.getScriptProperties();
 
-  // Limpiar para evitar duplicados
-  triggers.forEach(t => ScriptApp.deleteTrigger(t));
+  let yo = "";
+  try { yo = Session.getActiveUser().getEmail() || ""; } catch (e) {}
+  const activadoPor = prop.getProperty(CONTEO_CFG.PROP_ACTIVADO_POR) || "";
+
+  // Los triggers pertenecen a CADA usuario: si dos personas activan el mismo
+  // archivo quedan dos juegos de disparadores y todo se ejecuta dos veces.
+  // getProjectTriggers() sólo ve los propios, así que no se pueden borrar los
+  // ajenos: hay que avisar antes de duplicarlos.
+  if (activadoPor && yo && activadoPor !== yo) {
+    const r = ui.alert(
+      "⚠️ ESTE ARCHIVO YA ESTÁ ACTIVADO",
+      "Fue activado por:  " + activadoPor + "\n\n" +
+      "Los disparadores ya están funcionando con esa cuenta y no hace falta " +
+      "activarlo de nuevo.\n\n" +
+      "Si continúa, quedarán DOS juegos de disparadores y el archivo hará el " +
+      "trabajo por duplicado.\n\n¿Desea activarlo de todas formas?",
+      ui.ButtonSet.YES_NO);
+    if (r !== ui.Button.YES) {
+      ui.alert("✅ No se cambió nada. El archivo sigue funcionando con la activación de " + activadoPor + ".");
+      return;
+    }
+  }
+
+  // Limpia SOLO los disparadores de esta cuenta (los de otra no son visibles)
+  ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t));
 
   // 1. Instalar el "Escuchador" para cuando la WebApp envíe datos.
   // onChange es el ÚNICO evento que dispara una escritura hecha por otro script
@@ -198,15 +224,19 @@ function instalarTriggersEnCopia() {
     .create();
 
   // Despertar el sistema por primera vez
-  PropertiesService.getScriptProperties().setProperty(claveProp_('WMS_LAST_INTERACTION'), Date.now().toString());
-  PropertiesService.getScriptProperties().setProperty(claveProp_('WMS_SYSTEM_SLEEPING'), 'false');
+  prop.setProperty(claveProp_('WMS_LAST_INTERACTION'), Date.now().toString());
+  prop.setProperty(claveProp_('WMS_SYSTEM_SLEEPING'), 'false');
+  // Queda constancia de con qué cuenta corren los disparadores: es la que
+  // necesita acceso al archivo maestro del ABC.
+  if (yo) prop.setProperty(CONTEO_CFG.PROP_ACTIVADO_POR, yo);
+  prop.setProperty(CONTEO_CFG.PROP_ACTIVADO_EN, new Date().toISOString());
 
   // Los triggers corren CON LA CUENTA de quien activa. Se comprueba aquí mismo
   // que esa cuenta pueda leer el catálogo: es el momento en que el operario
   // puede hacer algo al respecto, no cuando ya está contando.
   const acc = verificarAccesos_();
 
-  SpreadsheetApp.getUi().alert(
+  ui.alert(
     "✅ ¡ARCHIVO ACTIVADO CON ÉXITO!\n\n" +
     "El sistema está escuchando a la Terminal WMS y a las capturas hechas a mano.\n\n" +
     "Con el PRIMER conteo registrado en las columnas V, W o X se sellan automáticamente:\n" +
@@ -214,12 +244,15 @@ function instalarTriggersEnCopia() {
     "  • Columna C: ID del inventario\n" +
     "  • Columna D: secuencia\n" +
     "  • Columna F: clasificación ABC (leída del archivo maestro)\n\n" +
+    "Los disparadores quedaron a nombre de: " + (yo || "(cuenta actual)") + "\n" +
+    "Es la cuenta que debe poder leer el archivo maestro; los demás editores no " +
+    "necesitan permisos ni autorizar nada.\n\n" +
     (acc.ok
-      ? "🔑 Accesos verificados: el ABC puede leerse con su cuenta."
-      : "⛔ ATENCIÓN: su cuenta NO puede leer el catálogo ABC.\n" +
+      ? "🔑 Accesos verificados: el ABC puede leerse con esta cuenta."
+      : "⛔ ATENCIÓN: esta cuenta NO puede leer el catálogo ABC.\n" +
         acc.maestroMsg + "\n\n" +
         "El resto del archivo funciona igual, pero la columna F no se llenará hasta " +
-        "que tenga acceso de LECTOR al archivo maestro.")
+        "que esta cuenta tenga acceso de LECTOR al archivo maestro.")
   );
 
   forzarInicializacionManual();
@@ -234,6 +267,17 @@ function instalarTriggersEnCopia() {
 // Ambos caminos entran al mismo pipeline y se deduplican con una FIRMA del
 // estado de los conteos, así el trabajo se hace una sola vez.
 // ==========================================
+
+// ¿El archivo tiene disparadores instalados por alguien? Se consulta la marca
+// que deja ACTIVAR ARCHIVO. Si falla la lectura (contexto sin permisos), se
+// asume que NO está activado para no dejar el archivo sin actualizar.
+function archivoActivado_() {
+  try {
+    return !!PropertiesService.getScriptProperties().getProperty(CONTEO_CFG.PROP_ACTIVADO_POR);
+  } catch (e) {
+    return false;
+  }
+}
 
 // Firma barata del estado: cuántos conteos hay en V:X, hasta qué fila y cuántas
 // filas tiene REGISTRO. Si no cambió, no hay nada nuevo que procesar (y de paso
@@ -459,8 +503,16 @@ function verificarAccesos_() {
 // puede leer el catálogo, sin tener que esperar a que falle un conteo.
 function menuVerificarAccesos() {
   const a = verificarAccesos_();
+  const activadoPor = PropertiesService.getScriptProperties().getProperty(CONTEO_CFG.PROP_ACTIVADO_POR);
   SpreadsheetApp.getUi().alert(
     "🔑 ACCESOS DE SU CUENTA" + (a.usuario ? "\n" + a.usuario : "") + "\n\n" +
+    (activadoPor
+      ? "Los disparadores corren con la cuenta: " + activadoPor + "\n" +
+        (activadoPor === a.usuario
+          ? "(es la suya: los accesos de abajo son los que cuentan)\n\n"
+          : "(NO es la suya: los permisos que importan son los de esa cuenta,\n" +
+            " usted no necesita acceso al maestro para operar)\n\n")
+      : "⚠️ El archivo aún no está activado (⚙️ → ACTIVAR ARCHIVO).\n\n") +
     (a.maestro ? "✅" : "⛔") + " Archivo maestro (CRONOGRAMA_CODIGOS)\n     " + a.maestroMsg + "\n\n" +
     (a.txt ? "✅" : "⚠️") + " Respaldo " + ABC_CFG.TXT_FALLBACK_NAME + "\n     " + a.txtMsg + "\n\n" +
     (a.ok ? "El ABC puede actualizarse con normalidad."
@@ -670,10 +722,12 @@ function onEdit(e) {
         // Si ingresan un conteo por primera vez de forma manual
         if (e.value) {
           registrarAccionManual(e, sheet, row, col);
-          // El pipeline también corre desde el trigger INSTALABLE alRegistrarConteo.
-          // Se deja aquí como red de seguridad por si el archivo aún no fue
-          // activado: la firma hace que sólo uno de los dos haga el trabajo.
-          procesarConteo_({ motivo: 'CONTEO_DIGITADO_SIMPLE' });
+          // El pipeline lo corre el trigger INSTALABLE alRegistrarConteo, con la
+          // cuenta que activó el archivo. Aquí sólo se hace de respaldo cuando
+          // el archivo NO está activado: este onEdit simple corre con la cuenta
+          // del operario y SIN autorización, así que no puede abrir el archivo
+          // maestro. Lanzarlo igual sólo generaría errores en su pantalla.
+          if (!archivoActivado_()) procesarConteo_({ motivo: 'CONTEO_DIGITADO_SIMPLE' });
         }
       }
     }

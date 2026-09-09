@@ -1,96 +1,93 @@
-# Copias hechas por el operario: qué pasa con permisos y triggers
+# Quién activa el archivo y qué permisos hace falta dar
 
-Escenario real: **cada operario saca su propia copia del archivo base**. Esta nota
-responde qué funciona, qué hay que preparar una sola vez y qué fricción queda.
-
----
-
-## 1. Sí, el operario puede activar su copia
-
-Quien copia un archivo de Google **es el propietario de la copia**, y el script
-contenedor se copia con ella. El operario no necesita permisos especiales sobre
-nada: es dueño de su archivo y de su script, así que puede ejecutar
-**⚙️ Inventarios WMS → ACTIVAR ARCHIVO** sin problema.
-
-Al activar verá **una pantalla de autorización de Google**. Es normal: está
-autorizando su propio script.
+Escenario real: **las copias se crean desde la cuenta del administrador** (Centro
+de Mando IMS). El administrador queda como **propietario** y el operario recibe
+rango de **Editor** sobre el archivo creado.
 
 ---
 
-## 2. La consecuencia importante: los triggers corren con SU cuenta
+## 1. La respuesta corta
 
-Los triggers instalables corren siempre como **el usuario que los instaló**. Si
-el archivo lo activa el operario, todo el motor —incluida la lectura del
-catálogo ABC— corre con la cuenta de ese operario.
+**El operario no necesita activar nada, y no necesita dar ningún permiso.**
 
-De ahí salen dos requisitos que hay que cumplir **una sola vez por operario**:
+Conviene que **active el propietario**, porque los disparadores instalables
+corren siempre **con la cuenta de quien los instaló** — no con la de quien edita.
+Si activa el propietario:
 
-| Recurso | Qué necesita el operario | Si falta |
+| | Propietario (administrador) | Operarios (editores) |
 |---|---|---|
-| **CONTEOS CICLICOS ITSANET** (hoja `CRONOGRAMA_CODIGOS`) | Permiso de **Lector** | El ABC no se puede leer |
-| **ABC2026.txt** (respaldo, opcional) | Que esté compartido con él | Se pierden los códigos que sólo están ahí (ej. HYCITE) |
+| Autoriza el script | **Una vez, por archivo** | **Nunca** |
+| Necesita acceso al archivo maestro del ABC | **Sí** | **No** |
+| Tiene que activar algo | Sí | No |
+| Puede contar con normalidad | Sí | **Sí, desde el primer momento** |
 
-Con que tenga **una** de las dos fuentes, el ABC ya funciona.
-
-> **Recomendación:** compartir el archivo maestro con el grupo de operarios como
-> **Lector**, una sola vez. Y configurar `ABC_CFG.TXT_FALLBACK_ID` con el ID del
-> `ABC2026.txt` compartido: la búsqueda por nombre sólo mira el Drive de cada
-> operario, así que sin el ID no lo encuentran.
-
-### Esto ya no falla en silencio
-
-* **Al activar**, se comprueban los accesos y el aviso lo dice de frente: o bien
-  «Accesos verificados», o bien qué falta y a qué archivo pedir permiso.
-* **Menú → Verificar accesos**: el operario lo comprueba cuando quiera, sin
-  esperar a que falle un conteo.
-* **Durante la operación**, si el catálogo no se puede leer aparece un aviso en
-  pantalla (máximo uno por hora) en vez de dejar la columna F vacía sin
-  explicación.
+El operario abre el archivo (o la Terminal), cuenta, y el motor hace todo el
+trabajo con la cuenta del propietario. No ve pantallas de autorización, no pide
+accesos y no espera a nadie.
 
 ---
 
-## 3. La fricción que queda: una autorización POR COPIA
+## 2. ¿Y si activa el operario? También puede, pero no conviene
 
-La autorización de Apps Script es **por proyecto de script**, y cada copia es un
-proyecto nuevo. Es decir:
+Un **Editor sí puede** ejecutar `ACTIVAR ARCHIVO`: el menú aparece para
+cualquiera que abra el archivo y, al usarlo, Google le pide autorizar el script.
+Los disparadores quedan a su nombre. Funciona, pero trae tres problemas:
 
-> El operario autoriza **una vez por cada archivo de inventario que crea**, no
-> una vez y para siempre.
+1. **Su cuenta pasa a necesitar acceso de Lector al archivo maestro.** Si no lo
+   tiene, la columna F no se llena.
+2. **Autoriza una vez por cada archivo**, porque cada copia es un proyecto de
+   script distinto.
+3. **Si además activa otro operario, quedan dos juegos de disparadores** y el
+   archivo hace el trabajo por duplicado. `getProjectTriggers()` sólo devuelve
+   los disparadores propios, así que ninguno puede borrar los del otro.
 
-Si saca tres inventarios al mes, son tres pantallas de autorización. Es la única
-fricción real que queda en este esquema, y **no se puede evitar** mientras los
-triggers vivan dentro de cada copia: es cómo funciona la plataforma.
+Por eso el código ahora:
+
+* **Guarda quién activó** (`WMS_ACTIVADO_POR`) y lo muestra en
+  **⚙️ → Verificar accesos**.
+* **Avisa antes de duplicar**: si alguien intenta activar un archivo que ya
+  activó otra persona, sale una confirmación explicando que quedarán dos juegos
+  de disparadores. Por defecto no se activa.
+* **Le dice a quien activa que su cuenta es la que necesita el acceso** al
+  maestro, y verifica ahí mismo si lo tiene.
+* **No lanza el pipeline desde el `onEdit` simple cuando el archivo ya está
+  activado.** Ese `onEdit` corre con la cuenta del operario y sin autorización,
+  así que no puede abrir el archivo maestro: ejecutarlo sólo produciría errores
+  en su pantalla. El trabajo lo hace el disparador instalable, que sí tiene
+  permisos. El respaldo se mantiene únicamente para archivos sin activar.
 
 ---
 
-## 4. Cómo eliminarla del todo
+## 3. Qué preparar, una sola vez
 
-Con el esquema que ya está implementado —**la Terminal WMS llama al motor**
-(`docs/INTEGRACION_TERMINAL_WMS.md`)— la fricción desaparece:
+1. **Compartir el archivo maestro** *CONTEOS CICLICOS ITSANET* como **Lector**
+   con la cuenta que va a activar los archivos (la del administrador).
+2. **Configurar `ABC_CFG.TXT_FALLBACK_ID`** con el ID de `ABC2026.txt`. La
+   búsqueda por nombre sólo mira el Drive de la cuenta que ejecuta; con el ID se
+   encuentra siempre.
+3. Al crear cada copia, abrirla una vez y ejecutar
+   **⚙️ Inventarios WMS → ACTIVAR ARCHIVO**. El aviso confirma con qué cuenta
+   quedaron los disparadores y si esa cuenta puede leer el catálogo.
 
-| | Triggers en cada copia | Terminal llama al motor |
+---
+
+## 4. Cómo eliminar el paso 3
+
+El paso 3 es lo único manual que queda, y desaparece con el esquema ya
+implementado en el que **la Terminal WMS llama al motor**
+(`docs/INTEGRACION_TERMINAL_WMS.md`):
+
+| | Activar cada copia | Terminal llama al motor |
 |---|---|---|
-| Autorizaciones del operario | **Una por cada copia** | **Una sola vez**, en la Terminal (o ninguna) |
-| Activar cada archivo nuevo | Sí | No |
-| Acceso al maestro | Cada operario | Sólo la cuenta que ejecuta la Terminal |
-| Si la Terminal se despliega como "ejecutar como el propietario" | — | El operario **no autoriza nada** |
+| Activar cada archivo nuevo | Sí, una vez por archivo | **No** |
+| Autorizaciones | Una por archivo (el propietario) | **Una sola vez**, en la Terminal |
+| Acceso al maestro | La cuenta que activa | La cuenta de la Terminal |
 
 El proyecto de la Terminal es **uno solo**: se autoriza una vez y sirve para
-todos los inventarios presentes y futuros. Y si además está desplegada como
-*"Ejecutar como: yo (propietario)"*, sólo el propietario necesita acceso al
-archivo maestro; los operarios no autorizan ni ven nada.
+todos los inventarios, presentes y futuros. Y si el Centro de Mando IMS ya crea
+las copias desde la cuenta del administrador, es el lugar natural para llamar
+también a `actualizarInventario(idNuevoArchivo)`.
 
----
-
-## 5. Recomendación práctica
-
-1. **Ahora:** compartir el archivo maestro como Lector con los operarios y
-   configurar `TXT_FALLBACK_ID`. Con eso, activar la copia funciona bien y el
-   operario sabe de inmediato si algo le falta.
-2. **Después:** mover el disparo a la Terminal WMS. Ahí desaparecen la
-   activación por archivo y la autorización por copia, y basta con que la cuenta
-   de la Terminal tenga acceso al maestro.
-
-Los dos esquemas conviven sin conflicto: si una copia tiene triggers y además le
-llega la llamada de la Terminal, la firma de estado hace que el trabajo se haga
-una sola vez.
+Los dos esquemas conviven: si un archivo tiene disparadores y además le llega la
+llamada de la Terminal, la firma de estado hace que el trabajo se haga una sola
+vez.

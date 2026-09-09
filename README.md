@@ -10,7 +10,7 @@ Archivo base para generación de inventarios (Google Apps Script del archivo hij
 | `docs/ANALISIS_ABC.md` | Análisis detallado del flujo de actualización ABC: fallas encontradas, causa y corrección aplicada. |
 | `docs/DISPARO_POR_CONTEO.md` | Disparo automático con el conteo en V/W/X: gatillos, firma de estado y arranque del inventario (A, C, D, F). |
 | `docs/INTEGRACION_TERMINAL_WMS.md` | Cómo llamar al motor desde la Terminal WMS para que el operario nunca abra el archivo real. |
-| `docs/COPIAS_Y_PERMISOS.md` | Copias creadas por el operario: permisos que necesita su cuenta y por qué la autorización es por copia. |
+| `docs/COPIAS_Y_PERMISOS.md` | Quién debe activar cada copia, con qué cuenta corren los disparadores y qué permisos hay que dar una sola vez. |
 | `tests/` | Pruebas en Node del comportamiento puro del ABC (normalización, índice alterno, escritura diferencial). |
 
 ## Arranque del inventario
@@ -32,7 +32,10 @@ deduplican con una firma del estado, así el trabajo se hace una sola vez y las
 escrituras del propio script no vuelven a disparar recálculos.
 
 > Para que el trigger de conteo quede instalado hay que ejecutar una vez
-> **⚙️ Inventarios WMS → ACTIVAR ARCHIVO** en cada archivo hijo.
+> **⚙️ Inventarios WMS → ACTIVAR ARCHIVO** en cada archivo hijo, **con la cuenta
+> del propietario**: los disparadores corren con la cuenta que los instala, así
+> que es la única que necesita acceso al archivo maestro. Los operarios editores
+> no autorizan ni piden nada.
 
 Ese paso manual se elimina si la Terminal WMS llama al motor directamente después
 de escribir el conteo (`actualizarInventario(idArchivo)`): sin triggers y sin

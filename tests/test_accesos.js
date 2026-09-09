@@ -62,4 +62,19 @@ props['WMS_AVISO_ABC:ID-1'] = String(Date.now() - 3600001);
 ctx.avisarProblemaABC_(ss, { ok: false, mensaje: 'sin catalogo' }, prop);
 eq(avisos.length, 2, 'pasada la hora vuelve a avisar');
 
+// --- El onEdit simple no debe trabajar si el archivo ya está activado ---
+// (corre con la cuenta del operario y sin autorización: no puede leer el maestro)
+const props2 = {};
+ctx.PropertiesService.getScriptProperties = () => ({
+  getProperty: k => (k in props2 ? props2[k] : null),
+  setProperty: (k, v) => { props2[k] = String(v); }
+});
+eq(ctx.archivoActivado_(), false, 'archivo sin activar: el respaldo del onEdit simple actua');
+props2['WMS_ACTIVADO_POR'] = 'brantos102@gmail.com';
+eq(ctx.archivoActivado_(), true, 'archivo activado: el trabajo lo hace el trigger instalable');
+
+// Si no se puede leer la propiedad, se asume NO activado para no dejar de actualizar
+ctx.PropertiesService.getScriptProperties = () => { throw new Error('sin permiso'); };
+eq(ctx.archivoActivado_(), false, 'ante la duda, actualiza igual');
+
 t.fin();
